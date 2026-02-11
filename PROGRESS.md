@@ -34,7 +34,7 @@
 - Step order: diffuse vel → project → advect vel → buoyancy → **project** → diffuse temp → advect temp → perturbation → advect particles
 
 ### Sub-issue 6: Renderer
-- `temperature_to_rgba`: Tokyo Night palette (dark navy→blue→cyan→orange→soft pink)
+- `temperature_to_rgba`: Blackbody palette (black→dark red→crimson→orange→amber)
 - Color bar with tick marks on the right side
 - `render`: accepts `&FrameSnapshot`, temperature field + particles + color bar → RGBA buffer with y-axis flip
 - Adaptive contrast particles (bright on dark, dark on bright backgrounds)
@@ -45,6 +45,7 @@
 - `encode_sixel`: icy_sixel fallback (test-only)
 - `SixelEncoder`: custom encoder with fixed 64-color palette + 32KB RGB→palette LUT for O(1) color mapping
 - `output_frame`: synchronized output (DEC 2026 BSU/ESU) + single-buffer write
+- Sixel-level vertical centering via empty band padding
 - 8 tests
 
 ### Sub-issue 8: Main loop — 3-thread pipeline
@@ -54,7 +55,7 @@
 - All channels use `recv()` (no frame skipping) for smooth particle trajectories
 - Ctrl+C handler with deadlock-free shutdown (`drop(rx)` before `join()`)
 - Alternate screen + cursor hide + Sixel scrolling disable
-- Display: full terminal width × half height (widescreen layout, simulation tiled 2×)
+- Display: full terminal width × 256px fixed height, vertically centered (widescreen layout, simulation tiled 2×)
 - 2 tests
 
 ## Performance Evolution
