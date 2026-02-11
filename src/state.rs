@@ -1,5 +1,6 @@
-pub const N: usize = 256;
+pub const N: usize = 128;
 pub const SIZE: usize = N * N;
+pub const NUM_PARTICLES: usize = 400;
 
 pub struct Xor128 {
     x: u32,
@@ -14,10 +15,11 @@ pub struct SimState {
     pub vx0: Vec<f64>,
     pub vy0: Vec<f64>,
     pub temperature: Vec<f64>,
-    pub density: Vec<f64>,
     pub work: Vec<f64>,
     pub work2: Vec<f64>,
     pub rng: Xor128,
+    pub particles_x: Vec<f64>,
+    pub particles_y: Vec<f64>,
 }
 
 /// Convert 2D coordinates to 1D index with wrapping (mod N).
@@ -52,7 +54,21 @@ impl Xor128 {
     }
 }
 
+pub struct FrameSnapshot {
+    pub temperature: Vec<f64>,
+    pub particles_x: Vec<f64>,
+    pub particles_y: Vec<f64>,
+}
+
 impl SimState {
+    pub fn snapshot(&self) -> FrameSnapshot {
+        FrameSnapshot {
+            temperature: self.temperature.clone(),
+            particles_x: self.particles_x.clone(),
+            particles_y: self.particles_y.clone(),
+        }
+    }
+
     pub fn new() -> Self {
         let mut rng = Xor128::new(42);
 
@@ -84,16 +100,28 @@ impl SimState {
             }
         }
 
+        // Initialize particles at random positions in the active interior
+        // (outside the 2-row Dirichlet boundary zone where velocity ≈ 0)
+        let mut particles_x = Vec::with_capacity(NUM_PARTICLES);
+        let mut particles_y = Vec::with_capacity(NUM_PARTICLES);
+        for _ in 0..NUM_PARTICLES {
+            let px = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
+            let py = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
+            particles_x.push(px);
+            particles_y.push(py);
+        }
+
         Self {
             vx,
             vy,
             vx0: vec![0.0; SIZE],
             vy0: vec![0.0; SIZE],
             temperature,
-            density: vec![0.0; SIZE],
             work: vec![0.0; SIZE],
             work2: vec![0.0; SIZE],
             rng,
+            particles_x,
+            particles_y,
         }
     }
 }
@@ -104,8 +132,8 @@ mod tests {
 
     #[test]
     fn test_grid_size() {
-        assert_eq!(N, 256);
-        assert_eq!(SIZE, 256 * 256);
+        assert_eq!(N, 128);
+        assert_eq!(SIZE, 128 * 128);
     }
 
     #[test]
@@ -113,7 +141,7 @@ mod tests {
         assert_eq!(idx(0, 0), 0);
         assert_eq!(idx(1, 0), 1);
         assert_eq!(idx(0, 1), N);
-        assert_eq!(idx(255, 255), SIZE - 1);
+        assert_eq!(idx((N - 1) as i32, (N - 1) as i32), SIZE - 1);
     }
 
     #[test]
@@ -179,7 +207,6 @@ mod tests {
         assert_eq!(state.vx0.len(), SIZE);
         assert_eq!(state.vy0.len(), SIZE);
         assert_eq!(state.temperature.len(), SIZE);
-        assert_eq!(state.density.len(), SIZE);
         assert_eq!(state.work.len(), SIZE);
         assert_eq!(state.work2.len(), SIZE);
     }
@@ -201,4 +228,23 @@ mod tests {
             assert!(v >= -1.0 && v < 1.0, "next_f64 out of range: {}", v);
         }
     }
+
+    #[test]
+    fn test_particle_count() {
+        let state = SimState::new();
+        assert_eq!(state.particles_x.len(), NUM_PARTICLES);
+        assert_eq!(state.particles_y.len(), NUM_PARTICLES);
+    }
+
+    #[test]
+    fn test_particles_in_domain() {
+        let state = SimState::new();
+        for i in 0..NUM_PARTICLES {
+            let px = state.particles_x[i];
+            let py = state.particles_y[i];
+            assert!(px >= 0.0 && px < N as f64, "particle x out of range: {}", px);
+            assert!(py >= 2.0 && py <= (N - 3) as f64, "particle y out of range: {}", py);
+        }
+    }
+
 }

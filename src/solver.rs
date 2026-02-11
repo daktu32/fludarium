@@ -1,19 +1,20 @@
 use crate::state::{idx, N};
 
-/// Boundary condition: top/bottom = Fixed (wall), left/right = Wrap (handled by idx mod).
-///   - field_type 0 (scalar): top/bottom copy neighbor (Neumann)
-///   - field_type 1 (vx): top/bottom copy neighbor (Neumann)
-///   - field_type 2 (vy): top/bottom negate (no-penetration wall)
-///   - field_type 3 (temperature): Dirichlet — fixed heat source pattern
+/// Boundary condition handler for top/bottom walls only.
+/// X-axis is periodic (wraps via idx).
+///   - field_type 0 (scalar): Neumann (copy neighbor) at walls
+///   - field_type 1 (vx): negate at walls (no-slip)
+///   - field_type 2 (vy): negate at walls (no-slip + no-penetration)
+///   - field_type 3 (temperature): top/bottom Dirichlet (hot bottom, cold top)
 pub fn set_bnd(field_type: i32, x: &mut [f64]) {
+    // Top/bottom walls (y boundaries)
     for i in 0..N {
         match field_type {
-            2 => {
+            1 | 2 => {
                 x[idx(i as i32, 0)] = -x[idx(i as i32, 1)];
                 x[idx(i as i32, (N - 1) as i32)] = -x[idx(i as i32, (N - 2) as i32)];
             }
             3 => {
-                // Temperature Dirichlet: uniform hot bottom, cold top
                 x[idx(i as i32, 0)] = 1.0;
                 x[idx(i as i32, 1)] = 1.0;
                 x[idx(i as i32, (N - 1) as i32)] = 0.0;
@@ -75,17 +76,15 @@ pub fn advect(field_type: i32, d: &mut [f64], d0: &[f64], vx: &[f64], vy: &[f64]
                 y = n_f - 1.5;
             }
 
-            // x wraps around (handled by idx)
-            let i0 = x.floor();
+            // X wraps via idx (no clamping needed)
+            let i0 = x.floor() as i32;
             let j0 = y.floor() as i32;
+            let i1 = i0 + 1;
             let j1 = j0 + 1;
-            let s1 = x - i0;
+            let s1 = x - i0 as f64;
             let s0 = 1.0 - s1;
             let t1 = y - j0 as f64;
             let t0 = 1.0 - t1;
-
-            let i0 = i0 as i32;
-            let i1 = i0 + 1;
 
             d[ii] = s0 * (t0 * d0[idx(i0, j0)] + t1 * d0[idx(i0, j1)])
                 + s1 * (t0 * d0[idx(i1, j0)] + t1 * d0[idx(i1, j1)]);
@@ -136,20 +135,18 @@ pub struct SolverParams {
     pub project_iter: usize,
     pub heat_buoyancy: f64,
     pub noise_amp: f64,
-    pub decay: f64,
 }
 
 impl Default for SolverParams {
     fn default() -> Self {
         Self {
-            visc: 0.0001,
+            visc: 0.0007,
             diff: 0.0001,
-            dt: 0.02,
-            diffuse_iter: 4,
+            dt: 0.002,
+            diffuse_iter: 20,
             project_iter: 20,
-            heat_buoyancy: 0.1,
-            noise_amp: 0.01,
-            decay: 0.999,
+            heat_buoyancy: 14.0,
+            noise_amp: 0.005,
         }
     }
 }
@@ -186,15 +183,72 @@ fn inject_thermal_perturbation(
 }
 
 /// Apply buoyancy force: hot fluid rises, cold fluid sinks.
-/// vy += buoyancy * (T - T_ambient), where T_ambient = 0.5
-/// Positive vy = upward (toward larger y = toward top of screen).
-fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64) {
+/// vy += dt * buoyancy * (T - T_ambient), where T_ambient = 0.5
+fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64, dt: f64) {
     let t_ambient = 0.5;
     for j in 1..(N - 1) {
         for i in 0..N {
             let ii = idx(i as i32, j as i32);
-            vy[ii] += buoyancy * (temperature[ii] - t_ambient);
+            vy[ii] += dt * buoyancy * (temperature[ii] - t_ambient);
         }
+    }
+}
+
+/// Advect particles through the velocity field using bilinear interpolation.
+/// X wraps (periodic), Y reflects at walls.
+fn advect_particles(state: &mut crate::state::SimState, dt: f64) {
+    let dt0 = dt * (N - 2) as f64;
+    let n_f = N as f64;
+
+    for p in 0..state.particles_x.len() {
+        let px = state.particles_x[p];
+        let py = state.particles_y[p];
+
+        // Bilinear interpolation of velocity at particle position
+        let i0 = px.floor() as i32;
+        let j0 = py.floor().max(0.0).min(n_f - 2.0) as i32;
+        let j1 = j0 + 1;
+        let sx = px - px.floor();
+        let sy = py - j0 as f64;
+
+        let vx_interp = (1.0 - sx) * (1.0 - sy) * state.vx[idx(i0, j0)]
+            + sx * (1.0 - sy) * state.vx[idx(i0 + 1, j0)]
+            + (1.0 - sx) * sy * state.vx[idx(i0, j1)]
+            + sx * sy * state.vx[idx(i0 + 1, j1)];
+
+        let vy_interp = (1.0 - sx) * (1.0 - sy) * state.vy[idx(i0, j0)]
+            + sx * (1.0 - sy) * state.vy[idx(i0 + 1, j0)]
+            + (1.0 - sx) * sy * state.vy[idx(i0, j1)]
+            + sx * sy * state.vy[idx(i0 + 1, j1)];
+
+        // Move particle forward
+        let new_x = px + dt0 * vx_interp;
+        let mut new_y = py + dt0 * vy_interp;
+
+        // Y: ping-pong reflect within interior [y_min, y_max].
+        // Keep particles outside the 2-row Dirichlet boundary zone where
+        // no-slip makes velocity ≈ 0 and particles would get trapped.
+        let y_min = 2.0;
+        let y_max = n_f - 3.0;
+        let y_range = y_max - y_min;
+        if new_y < y_min || new_y > y_max {
+            let mut t = (new_y - y_min) % (2.0 * y_range);
+            if t < 0.0 {
+                t += 2.0 * y_range;
+            }
+            new_y = if t <= y_range {
+                y_min + t
+            } else {
+                y_max - (t - y_range)
+            };
+        }
+        new_y = new_y.clamp(y_min, y_max);
+
+        // X: wrap around (periodic)
+        let new_x = ((new_x % n_f) + n_f) % n_f;
+
+        state.particles_x[p] = new_x;
+        state.particles_y[p] = new_y;
     }
 }
 
@@ -219,8 +273,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     advect(1, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt);
     advect(2, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt);
 
-    // Apply buoyancy (horizontal T variation → differential vy → survives projection)
-    apply_buoyancy(&mut state.vy, &state.temperature, params.heat_buoyancy);
+    // Apply buoyancy with dt scaling
+    apply_buoyancy(&mut state.vy, &state.temperature, params.heat_buoyancy, dt);
 
     // Project BEFORE temperature advection — velocity must be divergence-free
     project(
@@ -239,20 +293,10 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     if params.noise_amp > 0.0 {
         inject_thermal_perturbation(&mut state.temperature, &mut state.rng, params.noise_amp);
     }
+    // No velocity decay — viscous diffusion handles dissipation
 
-    // Damp velocity to prevent unbounded growth
-    for v in state.vx.iter_mut().chain(state.vy.iter_mut()) {
-        *v *= params.decay;
-    }
-
-    // Diffuse density
-    diffuse(0, &mut state.work, &state.density, params.diff, dt, params.diffuse_iter);
-    // Advect density
-    advect(0, &mut state.density, &state.work, &state.vx, &state.vy, dt);
-    // Decay density
-    for d in state.density.iter_mut() {
-        *d *= params.decay;
-    }
+    // Advect particles through the divergence-free velocity field
+    advect_particles(state, dt);
 }
 
 #[cfg(test)]
@@ -265,7 +309,6 @@ mod tests {
     #[test]
     fn test_set_bnd_scalar_copies_neighbor() {
         let mut field = vec![0.0; SIZE];
-        // Set interior values near boundary
         for i in 0..N {
             field[idx(i as i32, 1)] = 42.0;
             field[idx(i as i32, (N - 2) as i32)] = 99.0;
@@ -277,6 +320,24 @@ mod tests {
                 field[idx(i as i32, (N - 1) as i32)],
                 99.0,
                 "Top boundary should copy y=N-2"
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_bnd_vx_noslip() {
+        let mut field = vec![0.0; SIZE];
+        for i in 0..N {
+            field[idx(i as i32, 1)] = 5.0;
+            field[idx(i as i32, (N - 2) as i32)] = 3.0;
+        }
+        set_bnd(1, &mut field);
+        for i in 0..N {
+            assert_eq!(field[idx(i as i32, 0)], -5.0, "vx should negate at bottom (no-slip)");
+            assert_eq!(
+                field[idx(i as i32, (N - 1) as i32)],
+                -3.0,
+                "vx should negate at top (no-slip)"
             );
         }
     }
@@ -304,14 +365,15 @@ mod tests {
         // Start with a spike and solve - should smooth out
         let mut x = vec![0.0; SIZE];
         let mut x0 = vec![0.0; SIZE];
-        x0[idx(128, 128)] = 100.0;
+        let mid = (N / 2) as i32;
+        x0[idx(mid, mid)] = 100.0;
         x.copy_from_slice(&x0);
 
         lin_solve(0, &mut x, &x0, 1.0, 5.0, 20);
 
         // The spike should have spread
-        let center = x[idx(128, 128)];
-        let neighbor = x[idx(129, 128)];
+        let center = x[idx(mid, mid)];
+        let neighbor = x[idx(mid + 1, mid)];
         assert!(center > 0.0, "Center should still be positive");
         assert!(neighbor > 0.0, "Neighbors should get some value");
         assert!(center > neighbor, "Center should be larger than neighbor");
@@ -322,13 +384,14 @@ mod tests {
         let mut x0 = vec![0.0; SIZE];
         let mut x = vec![0.0; SIZE];
         // Create sharp spike
-        x0[idx(128, 128)] = 100.0;
+        let mid = (N / 2) as i32;
+        x0[idx(mid, mid)] = 100.0;
 
         diffuse(0, &mut x, &x0, 0.1, 0.1, 4);
 
         // After diffusion, energy should spread
-        let center = x[idx(128, 128)];
-        let neighbor = x[idx(129, 128)];
+        let center = x[idx(mid, mid)];
+        let neighbor = x[idx(mid + 1, mid)];
         assert!(center < 100.0, "Center should be less than original spike");
         assert!(neighbor > 0.0, "Neighbors should gain some value");
     }
@@ -408,8 +471,9 @@ mod tests {
                 let dy = j as f64 - cy as f64;
                 let r2 = dx * dx + dy * dy;
                 // Gaussian source at center
-                vx[idx(i as i32, j as i32)] = dx * 0.01 * (-r2 / 2000.0).exp();
-                vy[idx(i as i32, j as i32)] = dy * 0.01 * (-r2 / 2000.0).exp();
+                let sigma = (N as f64 * N as f64) / 32.0;
+                vx[idx(i as i32, j as i32)] = dx * 0.01 * (-r2 / sigma).exp();
+                vy[idx(i as i32, j as i32)] = dy * 0.01 * (-r2 / sigma).exp();
             }
         }
 
@@ -462,20 +526,21 @@ mod tests {
         let mut temperature = vec![0.5; SIZE];
 
         // Create a hot spot in the interior
-        for j in 60..70 {
-            for i in 120..136 {
+        let mid = N / 2;
+        for j in (mid - 5)..(mid + 5) {
+            for i in (mid - 8)..(mid + 8) {
                 temperature[idx(i as i32, j as i32)] = 1.0;
             }
         }
 
-        apply_buoyancy(&mut vy, &temperature, 1.0);
+        apply_buoyancy(&mut vy, &temperature, 1.0, 1.0);
 
         // Hot spot should have positive vy (upward = increasing y)
-        let hot_vy = vy[idx(128, 65)];
+        let hot_vy = vy[idx(mid as i32, mid as i32)];
         assert!(hot_vy > 0.0, "Hot spot should have positive vy (upward): got {}", hot_vy);
 
         // Ambient regions should have zero velocity
-        let ambient_vy = vy[idx(10, 128)];
+        let ambient_vy = vy[idx(10, (mid / 2) as i32)];
         assert!(ambient_vy.abs() < 1e-10, "Ambient should have zero vy");
     }
 
@@ -484,16 +549,86 @@ mod tests {
         let mut temperature = vec![0.5; SIZE];
         set_bnd(3, &mut temperature);
 
-        // Bottom should be uniformly hot (1.0)
+        // 2-row Dirichlet: y=0,1 hot; y=N-1,N-2 cold
         for i in 0..N {
-            let t = temperature[idx(i as i32, 0)];
-            assert!((t - 1.0).abs() < 1e-10, "Bottom should be 1.0, got {}", t);
+            assert!((temperature[idx(i as i32, 0)] - 1.0).abs() < 1e-10, "y=0 should be 1.0");
+            assert!((temperature[idx(i as i32, 1)] - 1.0).abs() < 1e-10, "y=1 should be 1.0");
+            assert!(temperature[idx(i as i32, (N - 1) as i32)].abs() < 1e-10, "y=N-1 should be 0.0");
+            assert!(temperature[idx(i as i32, (N - 2) as i32)].abs() < 1e-10, "y=N-2 should be 0.0");
+        }
+        // y=2 should NOT be overwritten (remains 0.5)
+        let t2 = temperature[idx(0, 2)];
+        assert!((t2 - 0.5).abs() < 1e-10, "y=2 should remain interior value, got {}", t2);
+    }
+
+    // === Particle advection tests ===
+
+    #[test]
+    fn test_advect_particles_zero_velocity() {
+        let mut state = SimState::new();
+        // Zero out velocity
+        state.vx.fill(0.0);
+        state.vy.fill(0.0);
+        let orig_x = state.particles_x.clone();
+        let orig_y = state.particles_y.clone();
+
+        advect_particles(&mut state, 0.02);
+
+        // Particles should not move
+        for i in 0..state.particles_x.len() {
+            assert!(
+                (state.particles_x[i] - orig_x[i]).abs() < 1e-10,
+                "Particle {} x moved with zero velocity",
+                i
+            );
+            assert!(
+                (state.particles_y[i] - orig_y[i]).abs() < 1e-10,
+                "Particle {} y moved with zero velocity",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_advect_particles_uniform_velocity() {
+        let mut state = SimState::new();
+        // Uniform rightward velocity
+        state.vx.fill(0.01);
+        state.vy.fill(0.0);
+        let orig_x = state.particles_x.clone();
+
+        advect_particles(&mut state, 0.02);
+
+        // All particles should have moved right
+        let dt0 = 0.02 * (N - 2) as f64;
+        let expected_dx = dt0 * 0.01;
+        for i in 0..state.particles_x.len() {
+            let dx = ((state.particles_x[i] - orig_x[i]) + N as f64) % N as f64;
+            assert!(
+                (dx - expected_dx).abs() < 1e-6 || (dx - expected_dx + N as f64).abs() < 1e-6,
+                "Particle {} dx={} expected ~{}",
+                i, dx, expected_dx
+            );
+        }
+    }
+
+    #[test]
+    fn test_advect_particles_stay_in_domain() {
+        let mut state = SimState::new();
+        let params = SolverParams::default();
+
+        // Run 50 steps with active flow
+        for _ in 0..50 {
+            fluid_step(&mut state, &params);
         }
 
-        // Top should be uniformly cold (0.0)
-        for i in 0..N {
-            let t = temperature[idx(i as i32, (N - 1) as i32)];
-            assert!(t.abs() < 1e-10, "Top should be 0.0, got {}", t);
+        // All particles should still be in domain
+        let n_f = N as f64;
+        for i in 0..state.particles_x.len() {
+            let px = state.particles_x[i];
+            let py = state.particles_y[i];
+            assert!(px >= 0.0 && px < n_f, "Particle {} x out of range: {}", i, px);
+            assert!(py >= 2.0 && py <= n_f - 3.0, "Particle {} y out of range: {}", i, py);
         }
     }
 

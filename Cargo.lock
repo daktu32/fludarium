@@ -362,6 +362,7 @@ dependencies = [
  "ctrlc",
  "icy_sixel",
  "image",
+ "libc",
 ]
 
 [[package]]
