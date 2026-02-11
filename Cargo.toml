@@ -1,0 +1,9 @@
+[package]
+name = "fluvarium"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+icy_sixel = "0.1"
+image = "0.25"
+ctrlc = "3.4"
