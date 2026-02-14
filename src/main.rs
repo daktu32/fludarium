@@ -44,8 +44,38 @@ enum TermKey {
 
 /// Parse a terminal key from raw bytes.
 /// Returns `(parsed_key, bytes_consumed)`. `consumed=0` means need more data.
-fn parse_key(_buf: &[u8]) -> (Option<TermKey>, usize) {
-    (None, 0) // stub
+fn parse_key(buf: &[u8]) -> (Option<TermKey>, usize) {
+    if buf.is_empty() {
+        return (None, 0);
+    }
+    match buf[0] {
+        0x1b => {
+            // ESC sequence
+            if buf.len() < 2 {
+                return (Some(TermKey::Escape), 1);
+            }
+            if buf[1] != b'[' {
+                return (Some(TermKey::Escape), 1);
+            }
+            // CSI sequence: ESC [ <final>
+            if buf.len() < 3 {
+                return (None, 0); // need more data
+            }
+            let key = match buf[2] {
+                b'A' => Some(TermKey::Up),
+                b'B' => Some(TermKey::Down),
+                b'C' => Some(TermKey::Right),
+                b'D' => Some(TermKey::Left),
+                _ => None,
+            };
+            (key, 3)
+        }
+        0x20 => (Some(TermKey::Space), 1),
+        b',' => (Some(TermKey::Comma), 1),
+        b'.' => (Some(TermKey::Period), 1),
+        b'q' | b'r' | b'm' | b'v' => (Some(TermKey::Char(buf[0] as char)), 1),
+        _ => (None, 1),
+    }
 }
 
 /// Convert RGBA &[u8] buffer to 0RGB &[u32] buffer for minifb.
