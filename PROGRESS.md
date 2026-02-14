@@ -1,8 +1,8 @@
 # fluvarium Progress
 
-## Current Status: Interactive Overlay Parameter Panel
+## Current Status: Dual-Model Fluid Simulator
 
-66 tests passing. 2-thread pipeline (physics + render/display). N=128 grid at 60fps with minifb. btop-style overlay panel for real-time parameter tuning.
+103 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel. No external config files — all defaults in code.
 
 ## Completed
 
@@ -12,57 +12,67 @@
 
 ### Sub-issue 2: SimState
 - `SimState` struct with all grid fields + Xor128 PRNG
-- `idx(x, y)` with mod wrap-around
-- `FrameSnapshot` for decoupling simulation state from rendering
-- Initial conditions: Gaussian hot spot at bottom center, cold top
-- 11 tests
+- `idx(x, y, nx)` with mod wrap-around, variable grid width
+- `FrameSnapshot` for decoupling simulation state from rendering (includes velocity, trails, cylinder geometry)
+- `FluidModel` enum: `RayleighBenard` / `KarmanVortex`
+- Initial conditions: Gaussian hot spot at bottom center (RB), uniform inflow + cylinder obstacle (Kármán)
+- Particle trail ring buffer (`TRAIL_LEN=8`) for trajectory visualization
+- Fractional cylinder mask with smooth anti-aliased edges
 
 ### Sub-issue 3: CFD primitives
-- `set_bnd`: field_type 0/1 (Neumann), 2 (no-penetration wall), 3 (temperature Dirichlet with Gaussian profile)
+- `BoundaryConfig` enum dispatches per-model boundary conditions
+- `set_bnd_rb`: periodic X, field_type 0/1 (Neumann), 2 (no-penetration wall), 3 (temperature Dirichlet with Gaussian profile)
+- `set_bnd_karman`: Left Dirichlet inflow, right zero-gradient outflow, top/bottom no-slip walls
 - `lin_solve`: Gauss-Seidel iteration
 - `diffuse`: implicit diffusion
 
 ### Sub-issue 4: Advection & projection
-- `advect`: Semi-Lagrangian reverse trace + bilinear interpolation
+- `advect`: Semi-Lagrangian reverse trace + bilinear interpolation, X clamping for Kármán
 - `project`: divergence → pressure solve → gradient subtraction
 
 ### Sub-issue 5: fluid_step & buoyancy
-- `SolverParams`: visc=0.008, diff=0.002, dt=0.003, buoyancy=8.0
-- Buoyancy: `vy += dt * buoyancy * (T - T_ambient)` where T_ambient=bottom_base (configurable)
+- `SolverParams` with `default()` (RB) and `default_karman()` — all params in code
+- Buoyancy: `vy += dt * buoyancy * (T - T_ambient)` where T_ambient=bottom_base
 - Localized Gaussian heat source (`inject_heat_source`) with volumetric heating + Newtonian cooling
 - Particle advection with bilinear velocity interpolation, periodic X wrap, ping-pong Y reflection
-- Temperature clamped to [0, 1]
-- Step order: diffuse vel → project → advect vel → buoyancy → **project** → diffuse temp → advect temp → inject heat → advect particles
-- **Fully parameterized**: bottom_base, source_strength, cool_rate via SolverParams
+- `fluid_step_karman`: inflow injection, cylinder mask damping, dye tracer, vorticity confinement, wake perturbation
+- Geometry-based particle respawn (distance check instead of mask threshold) to prevent surface sticking
 
 ### Sub-issue 6: Renderer
-- `temperature_to_rgba`: Blackbody palette (black→dark red→crimson→orange→amber)
+- Tokyo Night colormap (navy→blue→purple→pink→orange)
 - Color bar with tick marks on the right side
-- `render`: accepts `&FrameSnapshot`, temperature field + particles + color bar → RGBA buffer with y-axis flip
 - Adaptive contrast particles (bright on dark, dark on bright backgrounds)
 - Dynamic `RenderConfig::fit()` for arbitrary pixel dimensions and configurable tile count
-- **Status bar**: 5x7 bitmap font rendering current parameters (visc, diff, dt, buoyancy, bottom_base, cool_rate)
-- 10 tests
+- Kármán: stretched to window, smooth anti-aliased cylinder rendering, optional vorticity visualization, particle trails
+- **Status bar**: 5x7 bitmap font rendering current parameters
+- **Font system**: nearest-neighbor resize for overlay text
 
 ### Sub-issue 7: Sixel output (test-only)
 - `encode_sixel`: icy_sixel (test-only)
 - `SixelEncoder`: custom encoder with fixed 64-color palette + 32KB RGB→palette LUT (test-only)
-- 8 tests
 
 ### Sub-issue 8: Main loop — minifb native window
-- **Physics thread**: `fluid_step` (configurable steps/frame) → `FrameSnapshot` via `sync_channel(1)`
-- **Main thread**: `render()` → `rgba_to_argb()` → `window.update_with_buffer()` at configurable fps target
-- Ctrl+C handler with clean shutdown (`drop(rx)` before `join()`)
+- **Physics thread**: `fluid_step` / `fluid_step_karman` (configurable steps/frame) → `FrameSnapshot` via `sync_channel(1)`
+- **Main thread**: `render()` → `rgba_to_argb()` → `window.update_with_buffer()` at 60fps target
+- Ctrl+C handler with clean shutdown
 - **Resizable window** with dynamic re-render on size change
 - FPS counter in title bar
-- 2 tests
+- **M key**: model switch with per-model parameter preservation (`rb_params` / `karman_params`)
+- **V key**: toggle vorticity visualization (Kármán mode)
 
-### Sub-issue 9: YAML Configuration System
-- `config.rs`: `Config`, `PhysicsConfig`, `DisplayConfig`, `ParticlesConfig` structs
-- `serde(default)` for all fields — missing file or fields gracefully fall back to defaults
-- `fluvarium.yaml.example` documents all configurable parameters
-- Configurable: window size, tiles, fps target, steps per frame, all solver params, particle count
-- 1 test
+### Sub-issue 9: Interactive Overlay Parameter Panel
+- **overlay.rs**: btop-style semi-transparent panel with darken background
+  - `OverlayState` (visible, selected), `ParamDef` with get/set function pointers
+  - RB: 7 params (visc, diff, dt, buoyancy, source_strength, cool_rate, bottom_base)
+  - Kármán: 5 params (visc, diff, dt, inflow_vel, confinement)
+- **Keyboard controls**: Space=toggle, Up/Down=navigate, Left/Right=adjust, Comma/Period=fine, R=reset, Escape=close/quit
+- **Real-time tuning**: `mpsc::channel` sends updated `SolverParams` to physics thread
+
+### Config simplification
+- Removed YAML config system (`config.rs`, `serde`/`serde_yaml` dependencies)
+- All defaults managed in code: `SolverParams::default()`, `default_karman()`, `PARAM_DEFS_*`
+- Window size (1280×640), tiles, particles hardcoded in `main.rs`
+- Startup model: Kármán vortex (visc=0.015, diff=0.003, dt=0.06, confinement=3.0, cylinder at vertical center)
 
 ## Performance Evolution
 
@@ -86,27 +96,17 @@
 7. **Ctrl+C deadlock**: 3-thread pipeline deadlocked on shutdown (blocked senders) → `drop(sixel_rx)` before joining threads
 8. **Turbulent plume**: High buoyancy (60-200) caused Ra≈60,000+ with dominant numerical viscosity → physicist-tuned params (visc=0.008, diff=0.002, buoyancy=8.0) for clean convection
 9. **Sixel bottleneck**: Sixel encode+write limited to ~34fps → switched to minifb native window for 60fps
+10. **Particle sticking on cylinder**: mask threshold (>0.5) missed smooth edge zone → switched to geometry-based distance check with 1-cell margin
+11. **Config/default mismatch**: YAML config values diverged from `default_karman()` → removed config system, single source of truth in code
 
 ## Dependency Cleanup
 - Removed `libc` (terminal ioctl no longer needed with minifb)
 - Removed `image` (unused)
-- Removed `terminal_pixel_size` / `query_pixel_size_xterm` from renderer.rs
+- Removed `serde` + `serde_yaml` (YAML config removed)
 - Sixel encoder gated behind `#[cfg(test)]`
-- Added `serde` + `serde_yaml` for YAML config
-
-### Sub-issue 10: Interactive Overlay Parameter Panel
-- **overlay.rs**: btop-style semi-transparent panel with darken background
-  - `OverlayState` (visible, selected), `ParamDef` with get/set function pointers
-  - 7 adjustable parameters: visc, diff, dt, buoyancy, source_strength, cool_rate, bottom_base
-  - Teal gradient gauge bars, short labels per row, full description on detail line
-- **Keyboard controls**: Space=toggle, Up/Down=navigate, Left/Right=adjust, Comma/Period=fine, R=reset, Escape=close/quit
-- **Font system**: nearest-neighbor resize (5×7 → 7×9) for readable overlay text, 1x hints for visual hierarchy
-- **Real-time tuning**: `mpsc::channel` sends updated `SolverParams` to physics thread
-- **Dynamic status bar**: shows current params when panel hidden, key hints when visible
-- 11 new tests (9 overlay + 2 renderer)
 
 ## Test Summary
-- **66 tests, all passing** (1 ignored: diagnostic)
+- **103 tests, all passing** (1 ignored: diagnostic)
 - `cargo test` and `cargo build --release` both succeed with 0 warnings
 
 ## Next Steps

@@ -1,8 +1,6 @@
 use crate::renderer::{self, FONT_HEIGHT};
 use crate::solver::SolverParams;
-
-/// Number of adjustable parameters.
-const PARAM_COUNT: usize = 7;
+use crate::state::FluidModel;
 
 /// Panel layout constants.
 const GAUGE_WIDTH: usize = 8;
@@ -25,8 +23,8 @@ impl OverlayState {
         self.visible = !self.visible;
     }
 
-    pub fn navigate(&mut self, delta: isize) {
-        let count = PARAM_COUNT as isize;
+    pub fn navigate(&mut self, delta: isize, model: FluidModel) {
+        let count = param_defs(model).len() as isize;
         self.selected = ((self.selected as isize + delta).rem_euclid(count)) as usize;
     }
 }
@@ -45,8 +43,8 @@ pub struct ParamDef {
     pub set: fn(&mut SolverParams, f64),
 }
 
-/// All 7 adjustable parameters.
-pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
+/// Rayleigh-Benard adjustable parameters.
+const PARAM_DEFS_RB: [ParamDef; 7] = [
     ParamDef {
         name: "visc",
         short: "viscosity",
@@ -133,11 +131,83 @@ pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
     },
 ];
 
+/// Karman vortex adjustable parameters.
+const PARAM_DEFS_KARMAN: [ParamDef; 5] = [
+    ParamDef {
+        name: "visc",
+        short: "viscosity",
+        desc: "velocity viscosity coefficient",
+        min: 0.0005,
+        max: 0.05,
+        step: 0.0005,
+        fine_step: 0.0001,
+        default: 0.015,
+        get: |p| p.visc,
+        set: |p, v| p.visc = v,
+    },
+    ParamDef {
+        name: "diff",
+        short: "diffusion",
+        desc: "dye diffusion rate",
+        min: 0.0,
+        max: 0.01,
+        step: 0.0005,
+        fine_step: 0.0001,
+        default: 0.003,
+        get: |p| p.diff,
+        set: |p, v| p.diff = v,
+    },
+    ParamDef {
+        name: "dt",
+        short: "timestep",
+        desc: "simulation timestep",
+        min: 0.005,
+        max: 0.1,
+        step: 0.005,
+        fine_step: 0.001,
+        default: 0.06,
+        get: |p| p.dt,
+        set: |p, v| p.dt = v,
+    },
+    ParamDef {
+        name: "u0",
+        short: "inflow",
+        desc: "inflow velocity",
+        min: 0.01,
+        max: 0.3,
+        step: 0.01,
+        fine_step: 0.002,
+        default: 0.1,
+        get: |p| p.inflow_vel,
+        set: |p, v| p.inflow_vel = v,
+    },
+    ParamDef {
+        name: "conf",
+        short: "confine",
+        desc: "vorticity confinement strength",
+        min: 0.0,
+        max: 30.0,
+        step: 0.5,
+        fine_step: 0.1,
+        default: 3.0,
+        get: |p| p.confinement,
+        set: |p, v| p.confinement = v,
+    },
+];
+
+/// Get parameter definitions for the given fluid model.
+pub fn param_defs(model: FluidModel) -> &'static [ParamDef] {
+    match model {
+        FluidModel::RayleighBenard => &PARAM_DEFS_RB,
+        FluidModel::KarmanVortex => &PARAM_DEFS_KARMAN,
+    }
+}
+
 /// Adjust a parameter by delta steps (positive = increase, negative = decrease).
 /// If `fine` is true, use fine_step instead of step.
 /// Returns true if the value actually changed.
-pub fn adjust_param(params: &mut SolverParams, selected: usize, delta: i32, fine: bool) -> bool {
-    let def = &PARAM_DEFS[selected];
+pub fn adjust_param(params: &mut SolverParams, selected: usize, delta: i32, fine: bool, model: FluidModel) -> bool {
+    let def = &param_defs(model)[selected];
     let old = (def.get)(params);
     let step = if fine { def.fine_step } else { def.step };
     let new_val = (old + delta as f64 * step).clamp(def.min, def.max);
@@ -146,8 +216,8 @@ pub fn adjust_param(params: &mut SolverParams, selected: usize, delta: i32, fine
 }
 
 /// Reset a parameter to its default value.
-pub fn reset_param(params: &mut SolverParams, selected: usize) {
-    let def = &PARAM_DEFS[selected];
+pub fn reset_param(params: &mut SolverParams, selected: usize, model: FluidModel) {
+    let def = &param_defs(model)[selected];
     (def.set)(params, def.default);
 }
 
@@ -242,10 +312,14 @@ pub fn render_overlay(
     display_height: usize,
     state: &OverlayState,
     params: &SolverParams,
+    model: FluidModel,
 ) {
     if !state.visible {
         return;
     }
+
+    let defs = param_defs(model);
+    let param_count = defs.len();
 
     // Font: 2/3 of 2x → 7×9 pixels (nearest-neighbor resize from 5×7)
     let cw: usize = 7;
@@ -264,7 +338,7 @@ pub fn render_overlay(
     let panel_h = pad
         + row_h                         // header
         + 4                             // gap after header
-        + PARAM_COUNT * row_h           // 7 param rows
+        + param_count * row_h           // param rows
         + 6                             // gap
         + row_h                         // description
         + 4                             // gap
@@ -275,7 +349,7 @@ pub fn render_overlay(
     let panel_w = panel_w.min(display_width.saturating_sub(4));
     let panel_h = panel_h.min(display_height.saturating_sub(4));
     let px = display_width.saturating_sub(panel_w) / 2;
-    let py = display_height.saturating_sub(panel_h) / 2;
+    let py = display_height.saturating_sub(panel_h).saturating_sub(8);
 
     // Darken background
     darken_rect(buf, frame_width, px, py, panel_w, panel_h, 0.25);
@@ -287,11 +361,18 @@ pub fn render_overlay(
     let mut cy = py + pad;
 
     // Header
-    renderer::draw_text_sized(buf, frame_width, left, cy, "solver parameters", colors::HEADER, cw, ch);
+    let header = match model {
+        FluidModel::RayleighBenard => "rayleigh benard".to_string(),
+        FluidModel::KarmanVortex => {
+            let re = params.inflow_vel * (params.cylinder_radius * 2.0) / params.visc;
+            format!("karman vortex  re={:.0}", re)
+        }
+    };
+    renderer::draw_text_sized(buf, frame_width, left, cy, &header, colors::HEADER, cw, ch);
     cy += row_h + 4;
 
     // Parameter rows
-    for (i, def) in PARAM_DEFS.iter().enumerate() {
+    for (i, def) in defs.iter().enumerate() {
         let is_sel = i == state.selected;
         let label_color = if is_sel { colors::LABEL_SELECTED } else { colors::LABEL_NORMAL };
         let desc_color = if is_sel { colors::DESC_SELECTED } else { colors::DESC_NORMAL };
@@ -337,7 +418,7 @@ pub fn render_overlay(
     cy += 6;
 
     // Selected parameter description
-    let sel_def = &PARAM_DEFS[state.selected];
+    let sel_def = &defs[state.selected];
     renderer::draw_text_sized(buf, frame_width, left, cy, sel_def.desc, colors::DESC_SELECTED, cw, ch);
     cy += row_h + 4;
 
@@ -371,23 +452,38 @@ mod tests {
     }
 
     #[test]
-    fn test_navigate_wraps() {
+    fn test_navigate_wraps_rb() {
         let mut state = OverlayState::new();
+        let model = FluidModel::RayleighBenard;
+        let count = param_defs(model).len();
         assert_eq!(state.selected, 0);
-        state.navigate(-1);
-        assert_eq!(state.selected, PARAM_COUNT - 1, "Should wrap to last");
-        state.navigate(1);
+        state.navigate(-1, model);
+        assert_eq!(state.selected, count - 1, "Should wrap to last");
+        state.navigate(1, model);
+        assert_eq!(state.selected, 0, "Should wrap back to first");
+    }
+
+    #[test]
+    fn test_navigate_wraps_karman() {
+        let mut state = OverlayState::new();
+        let model = FluidModel::KarmanVortex;
+        let count = param_defs(model).len();
+        assert_eq!(count, 5);
+        state.navigate(-1, model);
+        assert_eq!(state.selected, 4, "Should wrap to last Karman param");
+        state.navigate(1, model);
         assert_eq!(state.selected, 0, "Should wrap back to first");
     }
 
     #[test]
     fn test_param_get_set_roundtrip() {
         let mut params = SolverParams::default();
-        for (i, def) in PARAM_DEFS.iter().enumerate() {
+        let defs = param_defs(FluidModel::RayleighBenard);
+        for (i, def) in defs.iter().enumerate() {
             let orig = (def.get)(&params);
             let new_val = (def.min + def.max) / 2.0;
             (def.set)(&mut params, new_val);
-            let read_back = (PARAM_DEFS[i].get)(&params);
+            let read_back = (defs[i].get)(&params);
             assert!(
                 (read_back - new_val).abs() < 1e-10,
                 "Param {} get/set roundtrip failed",
@@ -398,13 +494,28 @@ mod tests {
     }
 
     #[test]
-    fn test_param_defaults_match_solver() {
+    fn test_param_defaults_match_solver_rb() {
         let defaults = SolverParams::default();
-        for def in &PARAM_DEFS {
+        for def in param_defs(FluidModel::RayleighBenard) {
             let solver_val = (def.get)(&defaults);
             assert!(
                 (solver_val - def.default).abs() < 1e-10,
-                "PARAM_DEFS.default for {} ({}) doesn't match SolverParams::default() ({})",
+                "PARAM_DEFS_RB.default for {} ({}) doesn't match SolverParams::default() ({})",
+                def.name,
+                def.default,
+                solver_val
+            );
+        }
+    }
+
+    #[test]
+    fn test_param_defaults_match_solver_karman() {
+        let defaults = SolverParams::default_karman();
+        for def in param_defs(FluidModel::KarmanVortex) {
+            let solver_val = (def.get)(&defaults);
+            assert!(
+                (solver_val - def.default).abs() < 1e-10,
+                "PARAM_DEFS_KARMAN.default for {} ({}) doesn't match SolverParams::default_karman() ({})",
                 def.name,
                 def.default,
                 solver_val
@@ -454,13 +565,13 @@ mod tests {
 
     #[test]
     fn test_overlay_invisible_noop() {
-        let cfg = crate::renderer::RenderConfig::fit(542, 512, 3);
+        let cfg = crate::renderer::RenderConfig::fit(542, 512, 3, crate::state::N);
         let mut buf = vec![42u8; cfg.frame_width * cfg.frame_height * 4];
         let orig = buf.clone();
         let state = OverlayState::new(); // visible = false
         let params = SolverParams::default();
 
-        render_overlay(&mut buf, cfg.frame_width, cfg.display_width, cfg.display_height, &state, &params);
+        render_overlay(&mut buf, cfg.frame_width, cfg.display_width, cfg.display_height, &state, &params, FluidModel::RayleighBenard);
 
         assert_eq!(buf, orig, "Invisible overlay should not modify buffer");
     }
@@ -468,16 +579,17 @@ mod tests {
     #[test]
     fn test_adjust_clamps() {
         let mut params = SolverParams::default();
+        let model = FluidModel::RayleighBenard;
 
         // Try to decrease visc below min (0.0)
         params.visc = 0.0;
-        let changed = adjust_param(&mut params, 0, -1, false);
+        let changed = adjust_param(&mut params, 0, -1, false, model);
         assert!(!changed, "Should not change when at min");
         assert!((params.visc - 0.0).abs() < f64::EPSILON, "visc should stay at 0.0");
 
         // Try to increase visc above max (0.1)
         params.visc = 0.1;
-        let changed = adjust_param(&mut params, 0, 1, false);
+        let changed = adjust_param(&mut params, 0, 1, false, model);
         assert!(!changed, "Should not change when at max");
         assert!((params.visc - 0.1).abs() < f64::EPSILON, "visc should stay at 0.1");
     }
@@ -486,7 +598,7 @@ mod tests {
     fn test_reset_restores_default() {
         let mut params = SolverParams::default();
         params.visc = 0.05;
-        reset_param(&mut params, 0);
+        reset_param(&mut params, 0, FluidModel::RayleighBenard);
         assert!(
             (params.visc - 0.008).abs() < 1e-10,
             "visc should be reset to default 0.008, got {}",
