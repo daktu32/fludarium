@@ -6,7 +6,7 @@ mod particle;
 mod thermal;
 
 // Re-export public API
-pub use boundary::{BoundaryConfig, FieldType};
+pub use boundary::FieldType;
 pub use params::SolverParams;
 pub use thermal::inject_thermal_perturbation;
 
@@ -163,6 +163,7 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::boundary::BoundaryConfig;
     use crate::state::{idx, SimState, N};
 
     const BB: f64 = 0.15;

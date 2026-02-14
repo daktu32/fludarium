@@ -5,7 +5,7 @@ mod font;
 pub use font::render_status;
 pub(crate) use font::{draw_text, draw_text_sized, FONT_HEIGHT, FONT_WIDTH, STATUS_BAR_HEIGHT};
 
-use color::{BAR_GAP, BAR_TOTAL, BAR_WIDTH, LABEL_GAP, LABEL_WIDTH, TICK_LEN};
+use color::{BAR_GAP, BAR_TOTAL, BAR_WIDTH, LABEL_GAP, TICK_LEN};
 use font::FONT_HEIGHT as FH;
 use crate::state::{idx, FrameSnapshot, N};
 
@@ -398,7 +398,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     let type_label = viz_mode.label();
     let type_label_y = if dh > FH + 4 { 2 } else { 0 };
     // Right-align within bar area
-    let type_label_w = type_label.len() * (font::FONT_WIDTH + 1);
+    let type_label_w = type_label.len() * (FONT_WIDTH + 1);
     let type_label_x = if bar_x + BAR_WIDTH / 2 >= type_label_w / 2 {
         bar_x + BAR_WIDTH / 2 - type_label_w / 2
     } else {
@@ -527,6 +527,7 @@ pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::color::LABEL_WIDTH;
     use crate::state::SimState;
 
     fn test_config() -> RenderConfig {
