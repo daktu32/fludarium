@@ -1,7 +1,6 @@
 mod iterm2;
 mod overlay;
 mod renderer;
-mod sixel;
 mod solver;
 mod state;
 
@@ -1009,10 +1008,7 @@ mod tests {
             solver::fluid_step(&mut sim, &params);
             let snap = sim.snapshot();
             let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field);
-            let result = sixel::encode_sixel(&rgba, cfg.frame_width, cfg.frame_height);
-            assert!(result.is_ok(), "Sixel encoding should succeed");
-            let data = result.unwrap();
-            assert!(!data.is_empty(), "Sixel output should not be empty");
+            assert_eq!(rgba.len(), cfg.frame_width * cfg.frame_height * 4);
         }
     }
 

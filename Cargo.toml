@@ -1,10 +1,9 @@
 [package]
-name = "fluvarium"
+name = "fludarium"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-icy_sixel = "0.1"
 ctrlc = "3.4"
 minifb = "0.28.0"
 png = "0.17"
