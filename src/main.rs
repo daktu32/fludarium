@@ -28,6 +28,26 @@ impl Defaults {
     const HEADLESS_FRAME_INTERVAL_MS: u64 = 33;
 }
 
+/// Terminal key event parsed from raw stdin bytes.
+#[derive(Debug, Clone, PartialEq)]
+enum TermKey {
+    Space,
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+    Comma,
+    Period,
+    Char(char),
+}
+
+/// Parse a terminal key from raw bytes.
+/// Returns `(parsed_key, bytes_consumed)`. `consumed=0` means need more data.
+fn parse_key(_buf: &[u8]) -> (Option<TermKey>, usize) {
+    (None, 0) // stub
+}
+
 /// Convert RGBA &[u8] buffer to 0RGB &[u32] buffer for minifb.
 fn rgba_to_argb(rgba: &[u8], out: &mut [u32]) {
     for (i, pixel) in rgba.chunks_exact(4).enumerate() {
@@ -625,5 +645,143 @@ mod tests {
             assert!(w > 0);
             assert!(h > 0);
         }
+    }
+
+    // --- parse_key tests ---
+
+    #[test]
+    fn test_parse_key_empty() {
+        let (key, consumed) = parse_key(&[]);
+        assert_eq!(key, None);
+        assert_eq!(consumed, 0);
+    }
+
+    #[test]
+    fn test_parse_key_space() {
+        let (key, consumed) = parse_key(&[0x20]);
+        assert_eq!(key, Some(TermKey::Space));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_comma() {
+        let (key, consumed) = parse_key(&[b',']);
+        assert_eq!(key, Some(TermKey::Comma));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_period() {
+        let (key, consumed) = parse_key(&[b'.']);
+        assert_eq!(key, Some(TermKey::Period));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_char_q() {
+        let (key, consumed) = parse_key(&[b'q']);
+        assert_eq!(key, Some(TermKey::Char('q')));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_char_r() {
+        let (key, consumed) = parse_key(&[b'r']);
+        assert_eq!(key, Some(TermKey::Char('r')));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_char_m() {
+        let (key, consumed) = parse_key(&[b'm']);
+        assert_eq!(key, Some(TermKey::Char('m')));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_char_v() {
+        let (key, consumed) = parse_key(&[b'v']);
+        assert_eq!(key, Some(TermKey::Char('v')));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_arrow_up() {
+        let (key, consumed) = parse_key(&[0x1b, b'[', b'A']);
+        assert_eq!(key, Some(TermKey::Up));
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn test_parse_key_arrow_down() {
+        let (key, consumed) = parse_key(&[0x1b, b'[', b'B']);
+        assert_eq!(key, Some(TermKey::Down));
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn test_parse_key_arrow_right() {
+        let (key, consumed) = parse_key(&[0x1b, b'[', b'C']);
+        assert_eq!(key, Some(TermKey::Right));
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn test_parse_key_arrow_left() {
+        let (key, consumed) = parse_key(&[0x1b, b'[', b'D']);
+        assert_eq!(key, Some(TermKey::Left));
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn test_parse_key_escape_alone() {
+        // ESC followed by non-bracket byte → Escape key, consume 1
+        let (key, consumed) = parse_key(&[0x1b, b'x']);
+        assert_eq!(key, Some(TermKey::Escape));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_escape_only_byte() {
+        // Single ESC at end of buffer
+        let (key, consumed) = parse_key(&[0x1b]);
+        assert_eq!(key, Some(TermKey::Escape));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_incomplete_csi() {
+        // ESC [ but no final byte → need more data
+        let (key, consumed) = parse_key(&[0x1b, b'[']);
+        assert_eq!(key, None);
+        assert_eq!(consumed, 0);
+    }
+
+    #[test]
+    fn test_parse_key_unknown_csi() {
+        // ESC [ with unknown final byte → skip 3 bytes
+        let (key, consumed) = parse_key(&[0x1b, b'[', b'Z']);
+        assert_eq!(key, None);
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn test_parse_key_unknown_byte() {
+        let (key, consumed) = parse_key(&[0x01]);
+        assert_eq!(key, None);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_key_sequence_in_buffer() {
+        // Arrow up followed by space — parse_key should only consume the arrow
+        let buf = [0x1b, b'[', b'A', 0x20];
+        let (key, consumed) = parse_key(&buf);
+        assert_eq!(key, Some(TermKey::Up));
+        assert_eq!(consumed, 3);
+        // Second parse should get space
+        let (key2, consumed2) = parse_key(&buf[consumed..]);
+        assert_eq!(key2, Some(TermKey::Space));
+        assert_eq!(consumed2, 1);
     }
 }
