@@ -1,4 +1,4 @@
-# fluvarium Progress
+# fludarium Progress
 
 ## Current Status: Dual-Model Fluid Simulator with Optimized Headless Terminal Mode
 
@@ -142,9 +142,17 @@
 - Removed `serde` + `serde_yaml` (YAML config removed)
 - Sixel encoder gated behind `#[cfg(test)]`
 
+### Kent Beck-Style Refactoring (Phase 1 + 2)
+- **Step 1.1**: Extracted `create_sim_state()` — eliminated 5 duplicated `match model { KarmanVortex => new_karman(...), _ => new(...) }` patterns in main.rs
+- **Step 1.2**: Extracted `spawn_physics_thread()` + `PhysicsChannels` struct — eliminated identical 47-line physics thread closure duplicated between run_gui and run_headless (-29 lines)
+- **Step 1.3**: Extracted `ModelParams` struct with `save_and_switch()` — eliminated duplicated save/toggle/restore model-switch logic between GUI (M key) and headless (m key), with dedicated test
+- **Step 2.2**: Extracted `interpolate_velocity()` in solver.rs — shared bilinear velocity interpolation between `advect_particles` and `advect_particles_karman`, with 2 precision tests
+- **Phase 3 (YAGNI)**: Deferred trait-based abstractions until 3rd model per Kent Beck's Rule of Three
+
 ## Test Summary
-- **135 tests, all passing** (1 ignored: diagnostic)
+- **148 tests, all passing** (1 ignored: diagnostic)
 - Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test
+- ModelParams save_and_switch test + 2 interpolate_velocity precision tests
 - `cargo test` succeeds with 0 failures
 
 ## Next Steps
