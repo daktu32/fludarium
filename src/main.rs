@@ -78,6 +78,100 @@ fn parse_key(buf: &[u8]) -> (Option<TermKey>, usize) {
     }
 }
 
+/// Terminal raw mode via termios FFI (macOS only).
+#[cfg(target_os = "macos")]
+mod raw_term {
+    #[repr(C)]
+    struct Termios {
+        c_iflag: u64,
+        c_oflag: u64,
+        c_cflag: u64,
+        c_lflag: u64,
+        c_cc: [u8; 20],
+        c_ispeed: u64,
+        c_ospeed: u64,
+    }
+
+    const ECHO: u64 = 0x08;
+    const ICANON: u64 = 0x100;
+    const VMIN: usize = 16;
+    const VTIME: usize = 17;
+    const TCSANOW: i32 = 0;
+    const STDIN_FD: i32 = 0;
+
+    unsafe extern "C" {
+        fn tcgetattr(fd: i32, termios: *mut Termios) -> i32;
+        fn tcsetattr(fd: i32, action: i32, termios: *const Termios) -> i32;
+        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+
+    /// RAII guard that restores original terminal settings on drop.
+    pub struct RawTerminal {
+        original: Termios,
+    }
+
+    impl RawTerminal {
+        /// Enter raw mode: disable ICANON + ECHO, keep ISIG, set VMIN=0 VTIME=0.
+        /// Returns `None` if tcgetattr fails (e.g. no real terminal in tests).
+        pub fn enter() -> Option<Self> {
+            unsafe {
+                let mut original = std::mem::zeroed::<Termios>();
+                if tcgetattr(STDIN_FD, &mut original) != 0 {
+                    return None;
+                }
+                let mut raw = std::ptr::read(&original);
+                raw.c_lflag &= !(ICANON | ECHO);
+                raw.c_cc[VMIN] = 0;
+                raw.c_cc[VTIME] = 0;
+                if tcsetattr(STDIN_FD, TCSANOW, &raw) != 0 {
+                    return None;
+                }
+                Some(Self { original })
+            }
+        }
+    }
+
+    impl Drop for RawTerminal {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = tcsetattr(STDIN_FD, TCSANOW, &self.original);
+            }
+        }
+    }
+
+    /// Non-blocking read from stdin. Returns number of bytes read (0 if nothing available).
+    pub fn read_stdin(buf: &mut [u8]) -> usize {
+        unsafe {
+            // Set O_NONBLOCK via fcntl
+            const F_GETFL: i32 = 3;
+            const F_SETFL: i32 = 4;
+            const O_NONBLOCK: i32 = 0x0004;
+
+            let flags = fcntl(STDIN_FD, F_GETFL);
+            let _ = fcntl(STDIN_FD, F_SETFL, flags | O_NONBLOCK);
+            let n = read(STDIN_FD, buf.as_mut_ptr(), buf.len());
+            let _ = fcntl(STDIN_FD, F_SETFL, flags); // restore
+            if n > 0 { n as usize } else { 0 }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod raw_term {
+    pub struct RawTerminal;
+
+    impl RawTerminal {
+        pub fn enter() -> Option<Self> {
+            None
+        }
+    }
+
+    pub fn read_stdin(_buf: &mut [u8]) -> usize {
+        0
+    }
+}
+
 /// Convert RGBA &[u8] buffer to 0RGB &[u32] buffer for minifb.
 fn rgba_to_argb(rgba: &[u8], out: &mut [u32]) {
     for (i, pixel) in rgba.chunks_exact(4).enumerate() {
@@ -813,5 +907,24 @@ mod tests {
         let (key2, consumed2) = parse_key(&buf[consumed..]);
         assert_eq!(key2, Some(TermKey::Space));
         assert_eq!(consumed2, 1);
+    }
+
+    // --- raw_term tests ---
+
+    #[test]
+    fn test_raw_term_enter_in_test() {
+        // In test environments (no real terminal), enter() should return None
+        let guard = raw_term::RawTerminal::enter();
+        // We don't assert None because CI might have a terminal,
+        // but it should not panic either way.
+        drop(guard);
+    }
+
+    #[test]
+    fn test_raw_term_read_stdin_no_panic() {
+        let mut buf = [0u8; 64];
+        let n = raw_term::read_stdin(&mut buf);
+        // In tests, stdin has no data, so n should be 0 (or small).
+        assert!(n <= buf.len());
     }
 }
