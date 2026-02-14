@@ -1,8 +1,8 @@
 # fluvarium Progress
 
-## Current Status: Dual-Model Fluid Simulator with Headless Terminal Mode + Keyboard Controls
+## Current Status: Dual-Model Fluid Simulator with Optimized Headless Terminal Mode
 
-129 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls. No external config files — all defaults in code.
+135 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. No external config files — all defaults in code.
 
 ## Completed
 
@@ -96,6 +96,13 @@
   - Non-blocking `try_recv()` + keyboard polling loop at ~30fps
 - **20 new tests**: 18 parse_key + 2 raw_term smoke tests
 
+### Headless Performance & Resize
+- **Render resolution capping**: Headless render dimensions capped at ~200K pixels (`HEADLESS_MAX_RENDER_PIXELS = 640×320`), aspect-ratio preserving scale-down. Terminal upscales via iTerm2's `width/height` pixel parameters.
+- **Separate display dimensions**: `Iterm2Encoder::encode()` accepts image dimensions (for PNG) and display dimensions (for escape sequence) independently, enabling low-res render + full-res display.
+- **Adaptive particle size**: `RenderConfig::particle_radius` field (0=single pixel, 1=3×3 diamond). Headless at reduced resolution uses single-pixel dots so particles don't appear oversized after terminal upscaling.
+- **Dynamic terminal resize**: Each frame polls `TIOCGWINSZ` ioctl to detect terminal size changes. On resize: recomputes render dimensions, regenerates `RenderConfig`, triggers immediate redraw. Simulation grid (sim_nx) preserved (stretch-to-fit, matching GUI behavior).
+- **`headless_render_dims()` helper**: DRY extraction of render scale computation, shared between init and resize paths.
+
 ### Config simplification
 - Removed YAML config system (`config.rs`, `serde`/`serde_yaml` dependencies)
 - All defaults managed in code: `SolverParams::default()`, `default_karman()`, `PARAM_DEFS_*`
@@ -112,6 +119,8 @@
 | N=128, half-size (Sixel) | ~55 | None (all stages <16ms) |
 | N=128, full-width × half-height (Sixel) | ~34 | write (23ms) |
 | **minifb native window** | **~60** | **None (vsync-limited)** |
+| **Headless (pre-opt, 1280×640)** | ~20-25 | PNG encode + stdout I/O (>33ms/frame) |
+| **Headless (post-opt, 640×320)** | **~30** | **None (within 33ms budget)** |
 
 ## Key Debugging History
 
@@ -134,8 +143,8 @@
 - Sixel encoder gated behind `#[cfg(test)]`
 
 ## Test Summary
-- **129 tests, all passing** (1 ignored: diagnostic)
-- Includes 18 parse_key tests + 2 raw_term smoke tests
+- **135 tests, all passing** (1 ignored: diagnostic)
+- Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test
 - `cargo test` succeeds with 0 failures
 
 ## Next Steps

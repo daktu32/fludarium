@@ -4,6 +4,7 @@
 /// (PNG + base64) for display in compatible terminals (WezTerm, iTerm2).
 pub struct Iterm2Encoder {
     png_buf: Vec<u8>,
+    rgb_buf: Vec<u8>,
     b64_buf: String,
     seq_buf: Vec<u8>,
 }
@@ -12,14 +13,26 @@ impl Iterm2Encoder {
     pub fn new() -> Self {
         Self {
             png_buf: Vec::new(),
+            rgb_buf: Vec::new(),
             b64_buf: String::new(),
             seq_buf: Vec::new(),
         }
     }
 
     /// Encode an RGBA pixel buffer into an iTerm2 inline image escape sequence.
+    ///
+    /// `width`/`height` are the actual image dimensions (PNG resolution).
+    /// `disp_w`/`disp_h` are the display dimensions in the escape sequence
+    /// (the terminal scales the image to these pixel dimensions).
     /// Returns the complete escape sequence bytes ready for stdout.
-    pub fn encode(&mut self, rgba: &[u8], width: usize, height: usize) -> &[u8] {
+    pub fn encode(
+        &mut self,
+        rgba: &[u8],
+        width: usize,
+        height: usize,
+        disp_w: usize,
+        disp_h: usize,
+    ) -> &[u8] {
         use base64::Engine;
         use std::io::Write;
 
@@ -30,27 +43,30 @@ impl Iterm2Encoder {
             encoder.set_color(png::ColorType::Rgb);
             encoder.set_depth(png::BitDepth::Eight);
             encoder.set_compression(png::Compression::Fast);
+            encoder.set_filter(png::FilterType::NoFilter);
             let mut writer = encoder.write_header().expect("PNG header write");
-            // Strip alpha: RGBA → RGB
-            let rgb: Vec<u8> = rgba
-                .chunks_exact(4)
-                .flat_map(|px| [px[0], px[1], px[2]])
-                .collect();
-            writer.write_image_data(&rgb).expect("PNG data write");
+            // Strip alpha: RGBA → RGB (in-place reuse of rgb_buf)
+            let pixel_count = width * height;
+            self.rgb_buf.clear();
+            self.rgb_buf.reserve(pixel_count * 3);
+            for px in rgba.chunks_exact(4) {
+                self.rgb_buf.extend_from_slice(&px[..3]);
+            }
+            writer.write_image_data(&self.rgb_buf).expect("PNG data write");
         }
 
         // 2. Base64 encode the PNG bytes
         self.b64_buf.clear();
         base64::engine::general_purpose::STANDARD.encode_string(&self.png_buf, &mut self.b64_buf);
 
-        // 3. Build escape sequence
+        // 3. Build escape sequence (display dimensions for terminal scaling)
         self.seq_buf.clear();
         write!(
             self.seq_buf,
             "\x1b]1337;File=inline=1;size={};width={}px;height={}px;preserveAspectRatio=0:{}\x07",
             self.png_buf.len(),
-            width,
-            height,
+            disp_w,
+            disp_h,
             self.b64_buf,
         )
         .expect("escape sequence write");
@@ -81,7 +97,7 @@ mod tests {
     fn test_encode_produces_valid_escape_sequence() {
         let mut encoder = Iterm2Encoder::new();
         let rgba = make_test_rgba(32, 16);
-        let result = encoder.encode(&rgba, 32, 16);
+        let result = encoder.encode(&rgba, 32, 16, 32, 16);
 
         assert!(!result.is_empty(), "Encoded output should not be empty");
 
@@ -109,7 +125,7 @@ mod tests {
     fn test_encode_contains_base64_png() {
         let mut encoder = Iterm2Encoder::new();
         let rgba = make_test_rgba(16, 8);
-        let result = encoder.encode(&rgba, 16, 8);
+        let result = encoder.encode(&rgba, 16, 8, 16, 8);
         let as_str = std::str::from_utf8(result).expect("Should be valid UTF-8");
 
         // Extract base64 payload after the colon separator
@@ -135,13 +151,13 @@ mod tests {
 
         // First encode
         let rgba1 = make_test_rgba(8, 6);
-        let result1 = encoder.encode(&rgba1, 8, 6);
+        let result1 = encoder.encode(&rgba1, 8, 6, 8, 6);
         assert!(!result1.is_empty());
         let len1 = result1.len();
 
         // Second encode with different dimensions
         let rgba2 = make_test_rgba(16, 12);
-        let result2 = encoder.encode(&rgba2, 16, 12);
+        let result2 = encoder.encode(&rgba2, 16, 12, 16, 12);
         assert!(!result2.is_empty());
 
         // Second should be larger (more pixels → more data)
@@ -159,7 +175,7 @@ mod tests {
     fn test_encode_small_image() {
         let mut encoder = Iterm2Encoder::new();
         let rgba = make_test_rgba(8, 6);
-        let result = encoder.encode(&rgba, 8, 6);
+        let result = encoder.encode(&rgba, 8, 6, 8, 6);
 
         assert!(!result.is_empty(), "Should encode even small images");
         assert!(result.starts_with(b"\x1b]1337;File="));
@@ -169,5 +185,19 @@ mod tests {
         let as_str = std::str::from_utf8(result).expect("Valid UTF-8");
         assert!(as_str.contains("width=8px"), "Should specify width");
         assert!(as_str.contains("height=6px"), "Should specify height");
+    }
+
+    #[test]
+    fn test_encode_display_dimensions_differ_from_image() {
+        let mut encoder = Iterm2Encoder::new();
+        let rgba = make_test_rgba(16, 8);
+        // Image is 16×8 but display at 640×320
+        let result = encoder.encode(&rgba, 16, 8, 640, 320);
+
+        let as_str = std::str::from_utf8(result).expect("Valid UTF-8");
+        // Escape sequence should use display dimensions, not image dimensions
+        assert!(as_str.contains("width=640px"), "Should use display width");
+        assert!(as_str.contains("height=320px"), "Should use display height");
+        assert!(!as_str.contains("width=16px"), "Should NOT use image width");
     }
 }

@@ -207,6 +207,8 @@ pub struct RenderConfig {
     pub frame_height: usize,
     pub tiles: usize,
     pub sim_nx: usize,
+    /// Particle dot radius: 0 = single pixel, 1 = 3×3 diamond (default).
+    pub particle_radius: u8,
 }
 
 impl RenderConfig {
@@ -225,6 +227,7 @@ impl RenderConfig {
             frame_height: display_height + STATUS_BAR_HEIGHT,
             tiles,
             sim_nx,
+            particle_radius: 1,
         }
     }
 
@@ -453,14 +456,23 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                                 (0,  2, 0.3),
         ],
     ];
+    // Single-pixel trail shape for small particle_radius
+    const TRAIL_DOT: &[(isize, isize, f64)] = &[(0, 0, 1.0)];
+
+    let use_small_particles = cfg.particle_radius == 0;
+
     let trail_count = snap.trail_xs.len();
     if trail_count > 1 {
         for trail_idx in 0..(trail_count - 1) {
             let frac = (trail_idx + 1) as f64 / trail_count as f64;
             let alpha = frac * 0.8;
-            // Shape index: oldest=0 (small), newest=2 (large)
-            let shape_idx = (frac * 3.0).min(2.0) as usize;
-            let shape = TRAIL_SHAPES[shape_idx];
+            let shape = if use_small_particles {
+                TRAIL_DOT
+            } else {
+                // Shape index: oldest=0 (small), newest=2 (large)
+                let shape_idx = (frac * 3.0).min(2.0) as usize;
+                TRAIL_SHAPES[shape_idx]
+            };
             let txs = &snap.trail_xs[trail_idx];
             let tys = &snap.trail_ys[trail_idx];
 
@@ -524,24 +536,37 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                 CORE_BRIGHT[2] + t * (CORE_DARK[2] - CORE_BRIGHT[2]),
             ];
 
-            for &(dx, dy, is_core) in &DIAMOND {
-                let px = (cx + dx) as usize;
-                let py = (cy + dy) as usize;
+            if use_small_particles {
+                // Single pixel dot
+                let px = cx as usize;
+                let py = cy as usize;
                 if px < dw && py < dh {
                     let offset = (py * frame_width + px) * 4;
-                    if is_core {
-                        buf[offset] = core[0] as u8;
-                        buf[offset + 1] = core[1] as u8;
-                        buf[offset + 2] = core[2] as u8;
-                    } else {
-                        let bg_r = buf[offset] as f64;
-                        let bg_g = buf[offset + 1] as f64;
-                        let bg_b = buf[offset + 2] as f64;
-                        buf[offset] = (bg_r * 0.5 + core[0] * 0.5) as u8;
-                        buf[offset + 1] = (bg_g * 0.5 + core[1] * 0.5) as u8;
-                        buf[offset + 2] = (bg_b * 0.5 + core[2] * 0.5) as u8;
-                    }
+                    buf[offset] = core[0] as u8;
+                    buf[offset + 1] = core[1] as u8;
+                    buf[offset + 2] = core[2] as u8;
                     buf[offset + 3] = 255;
+                }
+            } else {
+                for &(dx, dy, is_core) in &DIAMOND {
+                    let px = (cx + dx) as usize;
+                    let py = (cy + dy) as usize;
+                    if px < dw && py < dh {
+                        let offset = (py * frame_width + px) * 4;
+                        if is_core {
+                            buf[offset] = core[0] as u8;
+                            buf[offset + 1] = core[1] as u8;
+                            buf[offset + 2] = core[2] as u8;
+                        } else {
+                            let bg_r = buf[offset] as f64;
+                            let bg_g = buf[offset + 1] as f64;
+                            let bg_b = buf[offset + 2] as f64;
+                            buf[offset] = (bg_r * 0.5 + core[0] * 0.5) as u8;
+                            buf[offset + 1] = (bg_g * 0.5 + core[1] * 0.5) as u8;
+                            buf[offset + 2] = (bg_b * 0.5 + core[2] * 0.5) as u8;
+                        }
+                        buf[offset + 3] = 255;
+                    }
                 }
             }
         }

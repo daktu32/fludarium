@@ -22,10 +22,13 @@ impl Defaults {
     const TARGET_FPS: usize = 60;
     const STEPS_PER_FRAME: usize = 1;
     const NUM_PARTICLES: usize = 400;
-    const RB_TILES: usize = 3;
-    const HEADLESS_WIDTH: usize = 640;
-    const HEADLESS_HEIGHT: usize = 320;
+    const RB_TILES: usize = 1;
+    const HEADLESS_WIDTH: usize = 1280;
+    const HEADLESS_HEIGHT: usize = 640;
     const HEADLESS_FRAME_INTERVAL_MS: u64 = 33;
+    /// Max pixel count for headless render resolution (~200K pixels).
+    /// Terminal upscales via iTerm2's width/height parameters.
+    const HEADLESS_MAX_RENDER_PIXELS: usize = 640 * 320;
 }
 
 /// Terminal key event parsed from raw stdin bytes.
@@ -322,9 +325,12 @@ fn run_gui() {
             if snap_tx.send(snap_buf).is_err() {
                 break;
             }
-            // Try to reclaim the buffer from the render thread; allocate fresh if unavailable
+            // Reclaim buffer from render thread; discard if size changed (model switch)
+            let expected_len = sim.nx * state::N;
             snap_buf = snap_return_rx.try_recv()
-                .unwrap_or_else(|_| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
+                .ok()
+                .filter(|b| b.temperature.len() == expected_len)
+                .unwrap_or_else(|| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
         }
     });
 
@@ -573,11 +579,26 @@ fn query_terminal_pixel_size() -> Option<(usize, usize)> {
     None
 }
 
+/// Compute capped render dimensions from terminal pixel size.
+/// Returns (render_w, render_h, scale_factor).
+fn headless_render_dims(term_w: usize, term_h: usize) -> (usize, usize, f64) {
+    let actual = term_w * term_h;
+    let max = Defaults::HEADLESS_MAX_RENDER_PIXELS;
+    let scale = if actual > max {
+        (max as f64 / actual as f64).sqrt()
+    } else {
+        1.0
+    };
+    let rw = ((term_w as f64 * scale) as usize).max(2);
+    let rh = ((term_h as f64 * scale) as usize).max(2);
+    (rw, rh, scale)
+}
+
 fn run_headless() {
     use std::io::Write;
 
     let mut model = Defaults::MODEL;
-    let (win_width, win_height) = query_terminal_pixel_size()
+    let (mut term_width, mut term_height) = query_terminal_pixel_size()
         .unwrap_or((Defaults::HEADLESS_WIDTH, Defaults::HEADLESS_HEIGHT));
     let steps_per_frame = Defaults::STEPS_PER_FRAME;
     let num_particles = Defaults::NUM_PARTICLES;
@@ -587,6 +608,9 @@ fn run_headless() {
         _ => rb_tiles,
     };
     let frame_interval = Duration::from_millis(Defaults::HEADLESS_FRAME_INTERVAL_MS);
+
+    // Cap render resolution for performance; terminal upscales via iTerm2 protocol
+    let (mut render_w, mut render_h, mut render_scale) = headless_render_dims(term_width, term_height);
 
     // Per-model parameter storage
     let mut rb_params = solver::SolverParams::default();
@@ -598,8 +622,12 @@ fn run_headless() {
     let mut show_vorticity = false;
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
 
-    let sim_nx = compute_sim_nx(win_width, win_height, model);
-    let mut render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, sim_nx);
+    // sim_nx based on terminal aspect ratio (not reduced render dims)
+    let sim_nx = compute_sim_nx(term_width, term_height, model);
+    let mut render_cfg = renderer::RenderConfig::fit(render_w, render_h, tiles, sim_nx);
+    if render_scale < 1.0 {
+        render_cfg.particle_radius = 0; // single-pixel dots at reduced resolution
+    }
 
     // Ctrl+C handler
     let running = Arc::new(AtomicBool::new(true));
@@ -641,6 +669,7 @@ fn run_headless() {
             while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
                 cur_model = new_model;
                 sim = new_sim;
+                snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
             }
 
             // Drain parameter updates (take latest)
@@ -658,8 +687,12 @@ fn run_headless() {
             if snap_tx.send(snap_buf).is_err() {
                 break;
             }
+            // Reclaim buffer from render thread; discard if size changed (model switch)
+            let expected_len = sim.nx * state::N;
             snap_buf = snap_return_rx.try_recv()
-                .unwrap_or_else(|_| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
+                .ok()
+                .filter(|b| b.temperature.len() == expected_len)
+                .unwrap_or_else(|| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
         }
     });
 
@@ -778,7 +811,7 @@ fn run_headless() {
                             state::FluidModel::KarmanVortex => 1,
                             _ => rb_tiles,
                         };
-                        let new_nx = compute_sim_nx(win_width, win_height, model);
+                        let new_nx = compute_sim_nx(term_width, term_height, model);
                         let new_sim = match model {
                             state::FluidModel::KarmanVortex => state::SimState::new_karman(
                                 num_particles,
@@ -793,7 +826,10 @@ fn run_headless() {
                         let _ = reset_tx.send((model, new_sim));
                         let _ = param_tx.send(current_params.clone());
                         overlay_state.selected = 0;
-                        render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, new_nx);
+                        render_cfg = renderer::RenderConfig::fit(render_w, render_h, tiles, new_nx);
+                        if render_scale < 1.0 {
+                            render_cfg.particle_radius = 0;
+                        }
                         status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
                         last_snap = None;
                         needs_redraw = true;
@@ -817,6 +853,24 @@ fn run_headless() {
             break;
         }
 
+        // --- Check for terminal resize ---
+        if let Some((new_tw, new_th)) = query_terminal_pixel_size() {
+            if new_tw != term_width || new_th != term_height {
+                term_width = new_tw;
+                term_height = new_th;
+                let (rw, rh, rs) = headless_render_dims(term_width, term_height);
+                render_w = rw;
+                render_h = rh;
+                render_scale = rs;
+                // Stretch to fit (keep sim_nx, like GUI mode)
+                render_cfg = renderer::RenderConfig::fit(render_w, render_h, tiles, render_cfg.sim_nx);
+                if render_scale < 1.0 {
+                    render_cfg.particle_radius = 0;
+                }
+                needs_redraw = true;
+            }
+        }
+
         // --- Non-blocking: grab latest snapshot ---
         let mut snap = None;
         while let Ok(s) = snap_rx.try_recv() {
@@ -836,7 +890,7 @@ fn run_headless() {
                 model,
             );
 
-            let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height);
+            let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height, term_width, term_height);
             let _ = write!(out, "\x1b[H");
             let _ = out.write_all(seq);
             let _ = out.flush();
@@ -860,7 +914,7 @@ fn run_headless() {
                     model,
                 );
 
-                let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height);
+                let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height, term_width, term_height);
                 let _ = write!(out, "\x1b[H");
                 let _ = out.write_all(seq);
                 let _ = out.flush();
@@ -972,7 +1026,7 @@ mod tests {
         let rgba = renderer::render(&snap, &cfg, false);
 
         let mut encoder = iterm2::Iterm2Encoder::new();
-        let seq = encoder.encode(&rgba, cfg.frame_width, cfg.frame_height);
+        let seq = encoder.encode(&rgba, cfg.frame_width, cfg.frame_height, 640, 320);
 
         assert!(seq.starts_with(b"\x1b]1337;File="));
         assert_eq!(seq.last(), Some(&0x07));
