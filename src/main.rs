@@ -1,3 +1,4 @@
+mod iterm2;
 mod overlay;
 mod renderer;
 mod sixel;
@@ -56,7 +57,19 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
     }
 }
 
+fn is_headless() -> bool {
+    std::env::args().any(|a| a == "--headless")
+}
+
 fn main() {
+    if is_headless() {
+        run_headless();
+    } else {
+        run_gui();
+    }
+}
+
+fn run_gui() {
     let mut model = state::FluidModel::KarmanVortex;
     let win_width = 1280;
     let win_height = 640;
@@ -355,6 +368,111 @@ fn main() {
     let _ = physics_thread.join();
 }
 
+fn run_headless() {
+    use std::io::Write;
+
+    let model = state::FluidModel::KarmanVortex;
+    let win_width = 640;
+    let win_height = 320;
+    let steps_per_frame = 1;
+    let num_particles = 400;
+    let tiles = match model {
+        state::FluidModel::KarmanVortex => 1,
+        _ => 3,
+    };
+    let frame_interval = Duration::from_millis(33); // ~30fps
+
+    let current_params = solver::SolverParams::default_karman();
+    let show_vorticity = false;
+    let status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
+
+    let sim_nx = compute_sim_nx(win_width, win_height, model);
+    let render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, sim_nx);
+
+    // Ctrl+C handler
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl+C handler");
+
+    // Physics thread → FrameSnapshot
+    let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
+    let physics_running = running.clone();
+    let init_params = current_params.clone();
+    let physics_thread = std::thread::spawn(move || {
+        let mut sim = match model {
+            state::FluidModel::KarmanVortex => state::SimState::new_karman(
+                num_particles,
+                init_params.inflow_vel,
+                init_params.cylinder_x,
+                init_params.cylinder_y,
+                init_params.cylinder_radius,
+                sim_nx,
+            ),
+            _ => state::SimState::new(num_particles, init_params.bottom_base, sim_nx),
+        };
+        let params = init_params;
+
+        while physics_running.load(Ordering::SeqCst) {
+            for _ in 0..steps_per_frame {
+                match model {
+                    state::FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
+                    _ => solver::fluid_step(&mut sim, &params),
+                }
+            }
+            if snap_tx.send(sim.snapshot()).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Terminal setup
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
+    let _ = write!(out, "\x1b[?1049h"); // alternate screen
+    let _ = write!(out, "\x1b[?25l"); // hide cursor
+    let _ = write!(out, "\x1b[2J"); // clear screen
+    let _ = out.flush();
+
+    let mut encoder = iterm2::Iterm2Encoder::new();
+
+    while running.load(Ordering::SeqCst) {
+        let frame_start = Instant::now();
+
+        // Blocking receive — waits for next physics frame
+        let snap = match snap_rx.recv() {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+
+        let mut rgba = renderer::render(&snap, &render_cfg, show_vorticity);
+        renderer::render_status(&mut rgba, &render_cfg, &status_text);
+
+        let seq = encoder.encode(&rgba, render_cfg.frame_width, render_cfg.frame_height);
+        let _ = write!(out, "\x1b[H"); // cursor home
+        let _ = out.write_all(seq);
+        let _ = out.flush();
+
+        // Rate limit to ~30fps
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_interval {
+            std::thread::sleep(frame_interval - elapsed);
+        }
+    }
+
+    // Terminal restore
+    let _ = write!(out, "\x1b[?25h"); // show cursor
+    let _ = write!(out, "\x1b[?1049l"); // restore main screen
+    let _ = out.flush();
+
+    // Shutdown
+    running.store(false, Ordering::SeqCst);
+    drop(snap_rx);
+    let _ = physics_thread.join();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +541,27 @@ mod tests {
         // Very tall window: aspect < 1
         let nx = compute_sim_nx(200, 800, state::FluidModel::KarmanVortex);
         assert_eq!(nx, state::N, "Karman NX should not go below N");
+    }
+
+    #[test]
+    fn test_headless_iterm2_pipeline() {
+        // End-to-end: physics → render → iterm2 encode
+        let params = solver::SolverParams::default_karman();
+        let nx = compute_sim_nx(640, 320, state::FluidModel::KarmanVortex);
+        let mut sim = state::SimState::new_karman(
+            100, params.inflow_vel, params.cylinder_x,
+            params.cylinder_y, params.cylinder_radius, nx,
+        );
+        let cfg = renderer::RenderConfig::fit(640, 320, 1, nx);
+
+        solver::fluid_step_karman(&mut sim, &params);
+        let snap = sim.snapshot();
+        let rgba = renderer::render(&snap, &cfg, false);
+
+        let mut encoder = iterm2::Iterm2Encoder::new();
+        let seq = encoder.encode(&rgba, cfg.frame_width, cfg.frame_height);
+
+        assert!(seq.starts_with(b"\x1b]1337;File="));
+        assert_eq!(seq.last(), Some(&0x07));
     }
 }

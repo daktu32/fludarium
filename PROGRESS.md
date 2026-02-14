@@ -1,8 +1,8 @@
 # fluvarium Progress
 
-## Current Status: Dual-Model Fluid Simulator
+## Current Status: Dual-Model Fluid Simulator with Headless Terminal Mode
 
-103 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel. No external config files — all defaults in code.
+108 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel. Headless terminal rendering via iTerm2 Graphics Protocol. No external config files — all defaults in code.
 
 ## Completed
 
@@ -68,6 +68,18 @@
 - **Keyboard controls**: Space=toggle, Up/Down=navigate, Left/Right=adjust, Comma/Period=fine, R=reset, Escape=close/quit
 - **Real-time tuning**: `mpsc::channel` sends updated `SolverParams` to physics thread
 
+### Sub-issue 10: Headless Terminal Mode (iTerm2 Graphics Protocol)
+- **iterm2.rs**: `Iterm2Encoder` struct with reusable buffers (PNG, base64, escape sequence)
+  - RGBA → RGB strip → PNG encode (fast compression) → base64 → iTerm2 `\x1b]1337;File=...` escape sequence
+  - Zero per-frame allocation via buffer reuse
+- **`--headless` CLI flag**: renders to terminal instead of opening minifb window
+  - 640×320 resolution at ~30fps
+  - Alternate screen buffer + hidden cursor for clean terminal output
+  - Ctrl+C restores terminal state (cursor visible, main screen)
+  - Same physics thread and render pipeline as GUI mode
+- **Dependencies**: `png = "0.17"`, `base64 = "0.22"`
+- **main.rs refactor**: `run_gui()` (existing) + `run_headless()` (new) dispatched from `main()`
+
 ### Config simplification
 - Removed YAML config system (`config.rs`, `serde`/`serde_yaml` dependencies)
 - All defaults managed in code: `SolverParams::default()`, `default_karman()`, `PARAM_DEFS_*`
@@ -106,7 +118,7 @@
 - Sixel encoder gated behind `#[cfg(test)]`
 
 ## Test Summary
-- **103 tests, all passing** (1 ignored: diagnostic)
+- **108 tests, all passing** (1 ignored: diagnostic)
 - `cargo test` and `cargo build --release` both succeed with 0 warnings
 
 ## Next Steps
