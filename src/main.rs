@@ -278,8 +278,9 @@ fn run_gui() {
     // Reset channel: main → physics thread (model switch)
     let (reset_tx, reset_rx) = mpsc::channel::<(state::FluidModel, state::SimState)>();
 
-    // Physics thread → FrameSnapshot
+    // Physics thread → FrameSnapshot (with return channel for buffer reuse)
     let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
+    let (snap_return_tx, snap_return_rx) = mpsc::channel::<FrameSnapshot>();
     let physics_running = running.clone();
     let init_params = current_params.clone();
     let physics_thread = std::thread::spawn(move || {
@@ -296,12 +297,14 @@ fn run_gui() {
             _ => state::SimState::new(num_particles, init_params.bottom_base, sim_nx),
         };
         let mut params = init_params;
+        let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
 
         while physics_running.load(Ordering::SeqCst) {
             // Check for model reset
             while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
                 cur_model = new_model;
                 sim = new_sim;
+                snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
             }
 
             // Drain parameter updates (take latest)
@@ -315,9 +318,13 @@ fn run_gui() {
                     _ => solver::fluid_step(&mut sim, &params),
                 }
             }
-            if snap_tx.send(sim.snapshot()).is_err() {
+            sim.snapshot_into(&mut snap_buf);
+            if snap_tx.send(snap_buf).is_err() {
                 break;
             }
+            // Try to reclaim the buffer from the render thread; allocate fresh if unavailable
+            snap_buf = snap_return_rx.try_recv()
+                .unwrap_or_else(|_| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
         }
     });
 
@@ -490,6 +497,10 @@ fn run_gui() {
                 model,
             );
             rgba_to_argb(&rgba_buf, &mut framebuf);
+            // Return old snapshot buffer to physics thread for reuse
+            if let Some(old) = last_snap.take() {
+                let _ = snap_return_tx.send(old);
+            }
             last_snap = Some(s);
             needs_redraw = false;
         } else if needs_redraw {
@@ -604,8 +615,9 @@ fn run_headless() {
     // Reset channel: main → physics thread (model switch)
     let (reset_tx, reset_rx) = mpsc::channel::<(state::FluidModel, state::SimState)>();
 
-    // Physics thread → FrameSnapshot
+    // Physics thread → FrameSnapshot (with return channel for buffer reuse)
     let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
+    let (snap_return_tx, snap_return_rx) = mpsc::channel::<FrameSnapshot>();
     let physics_running = running.clone();
     let init_params = current_params.clone();
     let physics_thread = std::thread::spawn(move || {
@@ -622,6 +634,7 @@ fn run_headless() {
             _ => state::SimState::new(num_particles, init_params.bottom_base, sim_nx),
         };
         let mut params = init_params;
+        let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
 
         while physics_running.load(Ordering::SeqCst) {
             // Check for model reset
@@ -641,9 +654,12 @@ fn run_headless() {
                     _ => solver::fluid_step(&mut sim, &params),
                 }
             }
-            if snap_tx.send(sim.snapshot()).is_err() {
+            sim.snapshot_into(&mut snap_buf);
+            if snap_tx.send(snap_buf).is_err() {
                 break;
             }
+            snap_buf = snap_return_rx.try_recv()
+                .unwrap_or_else(|_| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
         }
     });
 
@@ -824,6 +840,10 @@ fn run_headless() {
             let _ = write!(out, "\x1b[H");
             let _ = out.write_all(seq);
             let _ = out.flush();
+            // Return old snapshot buffer to physics thread for reuse
+            if let Some(old) = last_snap.take() {
+                let _ = snap_return_tx.send(old);
+            }
             last_snap = Some(s);
             needs_redraw = false;
         } else if needs_redraw {

@@ -29,6 +29,8 @@ pub struct SimState {
     pub temperature: Vec<f64>,
     pub work: Vec<f64>,
     pub work2: Vec<f64>,
+    pub work3: Vec<f64>,
+    pub work4: Vec<f64>,
     pub rng: Xor128,
     pub particles_x: Vec<f64>,
     pub particles_y: Vec<f64>,
@@ -48,6 +50,13 @@ pub struct SimState {
 pub fn idx(x: i32, y: i32, nx: usize) -> usize {
     let x = ((x % nx as i32) + nx as i32) as usize % nx;
     let y = ((y % N as i32) + N as i32) as usize % N;
+    y * nx + x
+}
+
+/// Fast index for interior cells where x,y are guaranteed in-bounds.
+/// Skips mod wrapping — use only when 0 <= x < nx and 0 <= y < N.
+#[inline(always)]
+pub const fn idx_inner(x: usize, y: usize, nx: usize) -> usize {
     y * nx + x
 }
 
@@ -90,6 +99,23 @@ pub struct FrameSnapshot {
     pub trail_ys: Vec<Vec<f64>>,
 }
 
+impl FrameSnapshot {
+    /// Pre-allocate a snapshot buffer matching the given simulation dimensions.
+    pub fn new_empty(nx: usize, n: usize, particle_count: usize) -> Self {
+        FrameSnapshot {
+            nx,
+            temperature: vec![0.0; nx * n],
+            vx: vec![0.0; nx * n],
+            vy: vec![0.0; nx * n],
+            particles_x: vec![0.0; particle_count],
+            particles_y: vec![0.0; particle_count],
+            cylinder: None,
+            trail_xs: vec![Vec::new(); TRAIL_LEN],
+            trail_ys: vec![Vec::new(); TRAIL_LEN],
+        }
+    }
+}
+
 impl SimState {
     /// Record current particle positions into the trail ring buffer.
     fn push_trail(&mut self) {
@@ -128,6 +154,39 @@ impl SimState {
             trail_xs: txs,
             trail_ys: tys,
         }
+    }
+
+    /// Copy current state into a pre-allocated snapshot, avoiding allocation.
+    pub fn snapshot_into(&mut self, dst: &mut FrameSnapshot) {
+        self.push_trail();
+
+        dst.temperature.copy_from_slice(&self.temperature);
+        dst.vx.copy_from_slice(&self.vx);
+        dst.vy.copy_from_slice(&self.vy);
+        dst.particles_x.copy_from_slice(&self.particles_x);
+        dst.particles_y.copy_from_slice(&self.particles_y);
+
+        // Copy trails in chronological order (oldest first).
+        // Resize dst.trail_xs/trail_ys to match trail_count (renderer uses .len()).
+        let count = self.trail_count;
+        dst.trail_xs.resize_with(count, Vec::new);
+        dst.trail_ys.resize_with(count, Vec::new);
+        for i in 0..count {
+            let slot = if self.trail_count < TRAIL_LEN {
+                i
+            } else {
+                (self.trail_cursor + i) % TRAIL_LEN
+            };
+            let src_x = &self.trail_xs[slot];
+            let src_y = &self.trail_ys[slot];
+            dst.trail_xs[i].resize(src_x.len(), 0.0);
+            dst.trail_ys[i].resize(src_y.len(), 0.0);
+            dst.trail_xs[i].copy_from_slice(src_x);
+            dst.trail_ys[i].copy_from_slice(src_y);
+        }
+
+        dst.nx = self.nx;
+        dst.cylinder = self.cylinder;
     }
 
     pub fn new(num_particles: usize, bottom_base: f64, nx: usize) -> Self {
@@ -174,6 +233,10 @@ impl SimState {
             particles_y.push(py);
         }
 
+        // Seed convection cells with large-scale thermal perturbation (initial only).
+        // Convection is self-sustaining after BC-driven heat source takes over.
+        crate::solver::inject_thermal_perturbation(&mut temperature, &mut rng, 0.05, nx);
+
         Self {
             nx,
             vx,
@@ -183,6 +246,8 @@ impl SimState {
             temperature,
             work: vec![0.0; size],
             work2: vec![0.0; size],
+            work3: vec![0.0; size],
+            work4: vec![0.0; size],
             rng,
             particles_x,
             particles_y,
@@ -244,6 +309,8 @@ impl SimState {
             temperature,
             work: vec![0.0; size],
             work2: vec![0.0; size],
+            work3: vec![0.0; size],
+            work4: vec![0.0; size],
             rng,
             particles_x,
             particles_y,
@@ -369,6 +436,8 @@ mod tests {
         assert_eq!(state.temperature.len(), N * N);
         assert_eq!(state.work.len(), N * N);
         assert_eq!(state.work2.len(), N * N);
+        assert_eq!(state.work3.len(), N * N);
+        assert_eq!(state.work4.len(), N * N);
     }
 
     #[test]
@@ -527,5 +596,60 @@ mod tests {
         assert_eq!(state.vy.len(), nx * N);
         assert_eq!(state.temperature.len(), nx * N);
         assert_eq!(state.mask.as_ref().unwrap().len(), nx * N);
+    }
+
+    #[test]
+    fn test_new_empty_dimensions() {
+        let snap = FrameSnapshot::new_empty(N, N, 100);
+        assert_eq!(snap.nx, N);
+        assert_eq!(snap.temperature.len(), N * N);
+        assert_eq!(snap.vx.len(), N * N);
+        assert_eq!(snap.vy.len(), N * N);
+        assert_eq!(snap.particles_x.len(), 100);
+        assert_eq!(snap.particles_y.len(), 100);
+        assert_eq!(snap.trail_xs.len(), TRAIL_LEN);
+        assert!(snap.cylinder.is_none());
+    }
+
+    #[test]
+    fn test_snapshot_into_matches_snapshot() {
+        let mut state = SimState::new(10, 0.15, N);
+        // Run a few snapshots to populate trails
+        for _ in 0..3 {
+            let _ = state.snapshot();
+        }
+
+        // Take a snapshot via both methods from the same state
+        let snap_clone = state.snapshot();
+        // Reset trail state to match (snapshot() calls push_trail, so we need a fresh state)
+        let mut state2 = SimState::new(10, 0.15, N);
+        for _ in 0..3 {
+            let _ = state2.snapshot();
+        }
+        let mut dst = FrameSnapshot::new_empty(N, N, 10);
+        state2.snapshot_into(&mut dst);
+
+        assert_eq!(dst.nx, snap_clone.nx);
+        assert_eq!(dst.temperature, snap_clone.temperature);
+        assert_eq!(dst.vx, snap_clone.vx);
+        assert_eq!(dst.vy, snap_clone.vy);
+        assert_eq!(dst.particles_x, snap_clone.particles_x);
+        assert_eq!(dst.particles_y, snap_clone.particles_y);
+        assert_eq!(dst.cylinder, snap_clone.cylinder);
+        assert_eq!(dst.trail_xs.len(), snap_clone.trail_xs.len());
+        assert_eq!(dst.trail_ys.len(), snap_clone.trail_ys.len());
+    }
+
+    #[test]
+    fn test_snapshot_into_reuse_buffer() {
+        let mut state = SimState::new(10, 0.15, N);
+        let mut dst = FrameSnapshot::new_empty(N, N, 10);
+
+        // Call snapshot_into multiple times to verify buffer reuse
+        for _ in 0..TRAIL_LEN + 3 {
+            state.snapshot_into(&mut dst);
+        }
+        // After TRAIL_LEN+3 calls, trail_xs should have TRAIL_LEN entries
+        assert_eq!(dst.trail_xs.len(), TRAIL_LEN);
     }
 }

@@ -1,4 +1,4 @@
-use crate::state::{idx, N};
+use crate::state::{idx, idx_inner, N};
 
 /// Field type for boundary condition dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,10 +48,8 @@ fn set_bnd_rb(field_type: FieldType, x: &mut [f64], bottom_base: f64, nx: usize)
                 let sigma = (N / 24) as f64;
                 let hot = bottom_base + (1.0 - bottom_base) * (-dx * dx / (2.0 * sigma * sigma)).exp();
                 x[idx(i as i32, 0, nx)] = hot;
-                x[idx(i as i32, 1, nx)] = hot;
                 // Top: cold
                 x[idx(i as i32, (N - 1) as i32, nx)] = 0.0;
-                x[idx(i as i32, (N - 2) as i32, nx)] = 0.0;
             }
             _ => {
                 x[idx(i as i32, 0, nx)] = x[idx(i as i32, 1, nx)];
@@ -112,20 +110,28 @@ fn set_bnd_karman(field_type: FieldType, x: &mut [f64], inflow_vel: f64, nx: usi
 /// Solves: x[i,j] = (x0[i,j] + a * (neighbors)) / c
 pub fn lin_solve(field_type: FieldType, x: &mut [f64], x0: &[f64], a: f64, c: f64, iter: usize, bc: &BoundaryConfig, nx: usize) {
     let c_inv = 1.0 / c;
-    // For Karman mode, skip X boundary cells to prevent periodic wrap contamination.
-    // RB mode uses 0..nx (periodic X via idx wrapping).
-    let (i_lo, i_hi) = match bc {
-        BoundaryConfig::KarmanVortex { .. } => (1, nx - 1),
-        _ => (0, nx),
-    };
+    // All modes iterate over the full X range; set_bnd overwrites boundary
+    // cells after each iteration, so including them is harmless and keeps
+    // the solver uniform across models.
+    let periodic_x = matches!(bc, BoundaryConfig::RayleighBenard { .. });
     for _ in 0..iter {
         for j in 1..(N - 1) {
-            for i in i_lo..i_hi {
-                let neighbors = x[idx(i as i32 - 1, j as i32, nx)]
-                    + x[idx(i as i32 + 1, j as i32, nx)]
-                    + x[idx(i as i32, j as i32 - 1, nx)]
-                    + x[idx(i as i32, j as i32 + 1, nx)];
-                x[idx(i as i32, j as i32, nx)] = (x0[idx(i as i32, j as i32, nx)] + a * neighbors) * c_inv;
+            for i in 0..nx {
+                let im1 = if periodic_x {
+                    if i == 0 { nx - 1 } else { i - 1 }
+                } else {
+                    i.saturating_sub(1)
+                };
+                let ip1 = if periodic_x {
+                    if i == nx - 1 { 0 } else { i + 1 }
+                } else {
+                    (i + 1).min(nx - 1)
+                };
+                let neighbors = x[idx_inner(im1, j, nx)]
+                    + x[idx_inner(ip1, j, nx)]
+                    + x[idx_inner(i, j - 1, nx)]
+                    + x[idx_inner(i, j + 1, nx)];
+                x[idx_inner(i, j, nx)] = (x0[idx_inner(i, j, nx)] + a * neighbors) * c_inv;
             }
         }
         set_bnd(field_type, x, bc, nx);
@@ -154,9 +160,11 @@ pub fn advect(field_type: FieldType, d: &mut [f64], d0: &[f64], vx: &[f64], vy: 
         _ => (0, nx),
     };
 
+    let periodic_x = matches!(bc, BoundaryConfig::RayleighBenard { .. });
+
     for j in 1..(N - 1) {
         for i in i_lo..i_hi {
-            let ii = idx(i as i32, j as i32, nx);
+            let ii = idx_inner(i, j, nx);
             // Trace backwards
             let x = i as f64 - dt0 * vx[ii];
             let mut y = j as f64 - dt0 * vy[ii];
@@ -175,17 +183,24 @@ pub fn advect(field_type: FieldType, d: &mut [f64], d0: &[f64], vx: &[f64], vy: 
                 _ => x, // RB: periodic, no clamping
             };
 
-            let i0 = x.floor() as i32;
-            let j0 = y.floor() as i32;
-            let i1 = i0 + 1;
+            let j0 = y.floor() as usize;
             let j1 = j0 + 1;
-            let s1 = x - i0 as f64;
+            let s1 = x - x.floor();
             let s0 = 1.0 - s1;
             let t1 = y - j0 as f64;
             let t0 = 1.0 - t1;
 
-            d[ii] = s0 * (t0 * d0[idx(i0, j0, nx)] + t1 * d0[idx(i0, j1, nx)])
-                + s1 * (t0 * d0[idx(i1, j0, nx)] + t1 * d0[idx(i1, j1, nx)]);
+            if periodic_x {
+                let i0 = x.floor() as i32;
+                let i1 = i0 + 1;
+                d[ii] = s0 * (t0 * d0[idx(i0, j0 as i32, nx)] + t1 * d0[idx(i0, j1 as i32, nx)])
+                    + s1 * (t0 * d0[idx(i1, j0 as i32, nx)] + t1 * d0[idx(i1, j1 as i32, nx)]);
+            } else {
+                let i0 = x.floor() as usize;
+                let i1 = i0 + 1;
+                d[ii] = s0 * (t0 * d0[idx_inner(i0, j0, nx)] + t1 * d0[idx_inner(i0, j1, nx)])
+                    + s1 * (t0 * d0[idx_inner(i1, j0, nx)] + t1 * d0[idx_inner(i1, j1, nx)]);
+            }
         }
     }
     set_bnd(field_type, d, bc, nx);
@@ -201,14 +216,18 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
         _ => (0, nx),
     };
 
+    let periodic_x = matches!(bc, BoundaryConfig::RayleighBenard { .. });
+
     // Calculate divergence
     for j in 1..(N - 1) {
         for i in i_lo..i_hi {
-            div[idx(i as i32, j as i32, nx)] = -0.5
+            let im1 = if periodic_x && i == 0 { nx - 1 } else { i - 1 };
+            let ip1 = if periodic_x && i == nx - 1 { 0 } else { i + 1 };
+            div[idx_inner(i, j, nx)] = -0.5
                 * h
-                * (vx[idx(i as i32 + 1, j as i32, nx)] - vx[idx(i as i32 - 1, j as i32, nx)]
-                    + vy[idx(i as i32, j as i32 + 1, nx)] - vy[idx(i as i32, j as i32 - 1, nx)]);
-            p[idx(i as i32, j as i32, nx)] = 0.0;
+                * (vx[idx_inner(ip1, j, nx)] - vx[idx_inner(im1, j, nx)]
+                    + vy[idx_inner(i, j + 1, nx)] - vy[idx_inner(i, j - 1, nx)]);
+            p[idx_inner(i, j, nx)] = 0.0;
         }
     }
     set_bnd(FieldType::Scalar, div, bc, nx);
@@ -220,10 +239,12 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
     // Subtract pressure gradient from velocity
     for j in 1..(N - 1) {
         for i in i_lo..i_hi {
-            vx[idx(i as i32, j as i32, nx)] -=
-                0.5 * (p[idx(i as i32 + 1, j as i32, nx)] - p[idx(i as i32 - 1, j as i32, nx)]) / h;
-            vy[idx(i as i32, j as i32, nx)] -=
-                0.5 * (p[idx(i as i32, j as i32 + 1, nx)] - p[idx(i as i32, j as i32 - 1, nx)]) / h;
+            let im1 = if periodic_x && i == 0 { nx - 1 } else { i - 1 };
+            let ip1 = if periodic_x && i == nx - 1 { 0 } else { i + 1 };
+            vx[idx_inner(i, j, nx)] -=
+                0.5 * (p[idx_inner(ip1, j, nx)] - p[idx_inner(im1, j, nx)]) / h;
+            vy[idx_inner(i, j, nx)] -=
+                0.5 * (p[idx_inner(i, j + 1, nx)] - p[idx_inner(i, j - 1, nx)]) / h;
         }
     }
     set_bnd(FieldType::Vx, vx, bc, nx);
@@ -338,8 +359,9 @@ pub fn inject_dye(state: &mut crate::state::SimState) {
 
 /// Inject large-scale temperature perturbation at convection-cell wavelengths.
 /// Small-scale (per-cell) noise gets killed by projection and diffusion.
-/// We need modes at wavelength ~nx/k (k=1..4) to seed/sustain convection cells.
-fn inject_thermal_perturbation(
+/// We need modes at wavelength ~nx/k (k=1..4) to seed convection cells.
+/// Called once at initialization; convection is self-sustaining thereafter.
+pub fn inject_thermal_perturbation(
     temperature: &mut [f64],
     rng: &mut crate::state::Xor128,
     amp: f64,
@@ -382,7 +404,7 @@ fn inject_heat_source(temperature: &mut [f64], dt: f64, source_strength: f64, co
         for i in 0..nx {
             let dx = i as f64 - center;
             let g = (-dx * dx / (2.0 * sigma * sigma)).exp();
-            let ii = idx(i as i32, j as i32, nx);
+            let ii = idx_inner(i, j, nx);
             temperature[ii] += dt * source_strength * g * y_factor;
         }
     }
@@ -391,7 +413,7 @@ fn inject_heat_source(temperature: &mut [f64], dt: f64, source_strength: f64, co
     for j in (N - 7)..(N - 2) {
         let y_factor = 1.0 - ((N - 3) - j) as f64 / 5.0;
         for i in 0..nx {
-            let ii = idx(i as i32, j as i32, nx);
+            let ii = idx_inner(i, j, nx);
             temperature[ii] *= 1.0 - dt * cool_rate * y_factor;
         }
     }
@@ -403,7 +425,7 @@ fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64, dt: f64, b
     let t_ambient = bottom_base;
     for j in 1..(N - 1) {
         for i in 0..nx {
-            let ii = idx(i as i32, j as i32, nx);
+            let ii = idx_inner(i, j, nx);
             vy[ii] += dt * buoyancy * (temperature[ii] - t_ambient);
         }
     }
@@ -527,36 +549,40 @@ fn advect_particles_karman(state: &mut crate::state::SimState, dt: f64) {
 /// Vorticity confinement: counteracts numerical diffusion by amplifying
 /// existing vortical structures. Essential for Stable Fluids to sustain
 /// vortex shedding (Fedkiw et al. 2001).
+///
+/// Uses `state.work3` (omega) and `state.work4` (|omega|) as scratch buffers
+/// to avoid per-frame allocation.
 fn vorticity_confinement(state: &mut crate::state::SimState, epsilon: f64, dt: f64) {
     let nx = state.nx;
-    let size = nx * N;
-    let mut omega = vec![0.0; size];
-    let mut abs_omega = vec![0.0; size];
+
+    // Clear scratch buffers
+    state.work3.iter_mut().for_each(|v| *v = 0.0);
+    state.work4.iter_mut().for_each(|v| *v = 0.0);
 
     // Compute vorticity: ω = ∂vy/∂x - ∂vx/∂y
-    for j in 1..(N - 1) as i32 {
-        for i in 1..(nx - 1) as i32 {
-            let dvydx = (state.vy[idx(i + 1, j, nx)] - state.vy[idx(i - 1, j, nx)]) * 0.5;
-            let dvxdy = (state.vx[idx(i, j + 1, nx)] - state.vx[idx(i, j - 1, nx)]) * 0.5;
+    for j in 1..(N - 1) {
+        for i in 1..(nx - 1) {
+            let dvydx = (state.vy[idx_inner(i + 1, j, nx)] - state.vy[idx_inner(i - 1, j, nx)]) * 0.5;
+            let dvxdy = (state.vx[idx_inner(i, j + 1, nx)] - state.vx[idx_inner(i, j - 1, nx)]) * 0.5;
             let w = dvydx - dvxdy;
-            omega[idx(i, j, nx)] = w;
-            abs_omega[idx(i, j, nx)] = w.abs();
+            state.work3[idx_inner(i, j, nx)] = w;
+            state.work4[idx_inner(i, j, nx)] = w.abs();
         }
     }
 
     // Compute ∇|ω| and apply confinement force: f = ε·Δx·(N̂ × ω)
-    for j in 2..(N - 2) as i32 {
-        for i in 2..(nx - 2) as i32 {
-            let eta_x = (abs_omega[idx(i + 1, j, nx)] - abs_omega[idx(i - 1, j, nx)]) * 0.5;
-            let eta_y = (abs_omega[idx(i, j + 1, nx)] - abs_omega[idx(i, j - 1, nx)]) * 0.5;
+    for j in 2..(N - 2) {
+        for i in 2..(nx - 2) {
+            let eta_x = (state.work4[idx_inner(i + 1, j, nx)] - state.work4[idx_inner(i - 1, j, nx)]) * 0.5;
+            let eta_y = (state.work4[idx_inner(i, j + 1, nx)] - state.work4[idx_inner(i, j - 1, nx)]) * 0.5;
             let len = (eta_x * eta_x + eta_y * eta_y).sqrt() + 1e-10;
             let norm_x = eta_x / len;
             let norm_y = eta_y / len;
 
-            let w = omega[idx(i, j, nx)];
+            let w = state.work3[idx_inner(i, j, nx)];
             // 2D cross product: f_x = ε·ny·ω, f_y = -ε·nx·ω
-            state.vx[idx(i, j, nx)] += dt * epsilon * norm_y * w;
-            state.vy[idx(i, j, nx)] -= dt * epsilon * norm_x * w;
+            state.vx[idx_inner(i, j, nx)] += dt * epsilon * norm_y * w;
+            state.vy[idx_inner(i, j, nx)] -= dt * epsilon * norm_x * w;
         }
     }
 }
@@ -689,10 +715,17 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
     advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
 
-    // Apply buoyancy with dt scaling
+    // Diffuse + advect temperature BEFORE buoyancy so buoyancy uses T^(n+1)
+    diffuse(FieldType::Temperature, &mut state.work, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
+    advect(FieldType::Temperature, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
+
+    // Volumetric heat source at bottom hot spot + cooling at top.
+    inject_heat_source(&mut state.temperature, dt, params.source_strength, params.cool_rate, nx);
+
+    // Apply buoyancy with T^(n+1) for better temporal coupling
     apply_buoyancy(&mut state.vy, &state.temperature, params.heat_buoyancy, dt, params.bottom_base, nx);
 
-    // Project BEFORE temperature advection — velocity must be divergence-free
+    // Project to make velocity divergence-free
     project(
         &mut state.vx,
         &mut state.vy,
@@ -703,17 +736,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
         nx,
     );
 
-    // Diffuse + advect temperature with divergence-free velocity
-    diffuse(FieldType::Temperature, &mut state.work, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
-    advect(FieldType::Temperature, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
-
-    // Inject large-scale temperature perturbation to seed/sustain convection cells
-    if params.noise_amp > 0.0 {
-        inject_thermal_perturbation(&mut state.temperature, &mut state.rng, params.noise_amp, nx);
-    }
-
-    // Volumetric heat source at bottom hot spot + cooling at top.
-    inject_heat_source(&mut state.temperature, dt, params.source_strength, params.cool_rate, nx);
+    // Note: thermal perturbation is now applied only at initialization (SimState::new),
+    // not every step. Convection cells are self-sustaining after BC fix (#18).
 
     // Clamp temperature to physical bounds [0, 1]
     for t in state.temperature.iter_mut() {
@@ -1237,7 +1261,7 @@ mod tests {
         // Top: cold
         for i in 0..N {
             assert!(temperature[idx(i as i32, (N - 1) as i32, N)].abs() < 1e-10, "y=N-1 should be 0.0");
-            assert!(temperature[idx(i as i32, (N - 2) as i32, N)].abs() < 1e-10, "y=N-2 should be 0.0");
+            assert!((temperature[idx(i as i32, (N - 2) as i32, N)] - 0.5).abs() < 1e-10, "y=N-2 should remain interior value");
         }
         // y=2 should NOT be overwritten (remains 0.5)
         let t2 = temperature[idx(0, 2, N)];
@@ -1534,5 +1558,29 @@ mod tests {
 
         // Diagnostic test: always passes
         assert!(true);
+    }
+
+    #[test]
+    fn test_convection_self_sustaining_without_noise() {
+        let mut state = SimState::new(400, 0.15, N);
+        let mut params = SolverParams::default();
+
+        // Initial 100 steps with perturbation to form convection cells
+        for _ in 0..100 {
+            fluid_step(&mut state, &params);
+        }
+
+        // Stop perturbation and run 1000 steps
+        params.noise_amp = 0.0;
+        for _ in 0..1000 {
+            fluid_step(&mut state, &params);
+        }
+
+        // Mid-layer temperature variance should persist (convection is self-sustaining)
+        let mid_y = N / 2;
+        let temps: Vec<f64> = (0..N).map(|x| state.temperature[idx(x as i32, mid_y as i32, N)]).collect();
+        let avg = temps.iter().sum::<f64>() / N as f64;
+        let variance = temps.iter().map(|t| (t - avg).powi(2)).sum::<f64>() / N as f64;
+        assert!(variance > 1e-6, "Convection should persist without noise: variance={}", variance);
     }
 }
