@@ -186,6 +186,15 @@
 - ModelParams save_and_switch test + 2 interpolate_velocity precision tests
 - `cargo test` succeeds with 0 failures
 
+### Distribution Setup
+- Added `Cargo.toml` metadata: authors, description, license, repository, keywords, categories
+- Created MIT LICENSE file
+- Updated README.md with Install section (`cargo install` and `brew tap`/`brew install`)
+- Verified `cargo install --path .` produces working `fludarium` binary
+- Removed obsolete `PRD.md`
+
 ## Next Steps
+- Tag v0.1.0 and push for GitHub Release
+- Create `daktu32/homebrew-fludarium` tap repository with formula
 - Fine-tune convection dynamics (plume count, speed, visual appeal)
 - Issue #10: Simulation presets
