@@ -565,23 +565,30 @@ fn query_terminal_pixel_size() -> Option<(usize, usize)> {
 fn run_headless() {
     use std::io::Write;
 
-    let model = Defaults::MODEL;
+    let mut model = Defaults::MODEL;
     let (win_width, win_height) = query_terminal_pixel_size()
         .unwrap_or((Defaults::HEADLESS_WIDTH, Defaults::HEADLESS_HEIGHT));
     let steps_per_frame = Defaults::STEPS_PER_FRAME;
     let num_particles = Defaults::NUM_PARTICLES;
-    let tiles = match model {
+    let rb_tiles = Defaults::RB_TILES;
+    let mut tiles = match model {
         state::FluidModel::KarmanVortex => 1,
-        _ => Defaults::RB_TILES,
+        _ => rb_tiles,
     };
     let frame_interval = Duration::from_millis(Defaults::HEADLESS_FRAME_INTERVAL_MS);
 
-    let current_params = solver::SolverParams::default_karman();
-    let show_vorticity = false;
-    let status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
+    // Per-model parameter storage
+    let mut rb_params = solver::SolverParams::default();
+    let mut karman_params = solver::SolverParams::default_karman();
+    let mut current_params = match model {
+        state::FluidModel::KarmanVortex => karman_params.clone(),
+        _ => rb_params.clone(),
+    };
+    let mut show_vorticity = false;
+    let mut status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
 
     let sim_nx = compute_sim_nx(win_width, win_height, model);
-    let render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, sim_nx);
+    let mut render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, sim_nx);
 
     // Ctrl+C handler
     let running = Arc::new(AtomicBool::new(true));
@@ -591,12 +598,19 @@ fn run_headless() {
     })
     .expect("Error setting Ctrl+C handler");
 
+    // Parameter channel: main → physics thread
+    let (param_tx, param_rx) = mpsc::channel::<solver::SolverParams>();
+
+    // Reset channel: main → physics thread (model switch)
+    let (reset_tx, reset_rx) = mpsc::channel::<(state::FluidModel, state::SimState)>();
+
     // Physics thread → FrameSnapshot
     let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
     let physics_running = running.clone();
     let init_params = current_params.clone();
     let physics_thread = std::thread::spawn(move || {
-        let mut sim = match model {
+        let mut cur_model = model;
+        let mut sim = match cur_model {
             state::FluidModel::KarmanVortex => state::SimState::new_karman(
                 num_particles,
                 init_params.inflow_vel,
@@ -607,11 +621,22 @@ fn run_headless() {
             ),
             _ => state::SimState::new(num_particles, init_params.bottom_base, sim_nx),
         };
-        let params = init_params;
+        let mut params = init_params;
 
         while physics_running.load(Ordering::SeqCst) {
+            // Check for model reset
+            while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
+                cur_model = new_model;
+                sim = new_sim;
+            }
+
+            // Drain parameter updates (take latest)
+            while let Ok(new_params) = param_rx.try_recv() {
+                params = new_params;
+            }
+
             for _ in 0..steps_per_frame {
-                match model {
+                match cur_model {
                     state::FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
                     _ => solver::fluid_step(&mut sim, &params),
                 }
@@ -622,6 +647,11 @@ fn run_headless() {
         }
     });
 
+    // Overlay state
+    let mut overlay_state = overlay::OverlayState::new();
+    let mut last_snap: Option<FrameSnapshot> = None;
+    let mut needs_redraw = false;
+
     // Terminal setup
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
@@ -630,25 +660,193 @@ fn run_headless() {
     let _ = write!(out, "\x1b[2J"); // clear screen
     let _ = out.flush();
 
+    // Enter raw terminal mode (RAII — restored on drop)
+    let _raw_guard = raw_term::RawTerminal::enter();
+
     let mut encoder = iterm2::Iterm2Encoder::new();
     let mut rgba_buf: Vec<u8> = Vec::new();
+    let mut stdin_buf = [0u8; 64];
+    let mut stdin_pending = 0usize; // bytes in stdin_buf not yet consumed
 
     while running.load(Ordering::SeqCst) {
         let frame_start = Instant::now();
 
-        // Blocking receive — waits for next physics frame
-        let snap = match snap_rx.recv() {
-            Ok(s) => s,
-            Err(_) => break,
-        };
+        // --- Keyboard polling ---
+        let n = raw_term::read_stdin(&mut stdin_buf[stdin_pending..]);
+        stdin_pending += n;
 
-        renderer::render_into(&mut rgba_buf, &snap, &render_cfg, show_vorticity);
-        renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
+        let mut cursor = 0;
+        while cursor < stdin_pending {
+            let (key, consumed) = parse_key(&stdin_buf[cursor..stdin_pending]);
+            if consumed == 0 {
+                break; // need more data
+            }
+            cursor += consumed;
 
-        let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height);
-        let _ = write!(out, "\x1b[H"); // cursor home
-        let _ = out.write_all(seq);
-        let _ = out.flush();
+            if let Some(k) = key {
+                match k {
+                    TermKey::Escape => {
+                        if overlay_state.visible {
+                            overlay_state.visible = false;
+                            status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
+                            needs_redraw = true;
+                        } else {
+                            running.store(false, Ordering::SeqCst);
+                        }
+                    }
+                    TermKey::Char('q') => {
+                        running.store(false, Ordering::SeqCst);
+                    }
+                    TermKey::Space => {
+                        overlay_state.toggle();
+                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+                        needs_redraw = true;
+                    }
+                    TermKey::Up if overlay_state.visible => {
+                        overlay_state.navigate(-1, model);
+                        needs_redraw = true;
+                    }
+                    TermKey::Down if overlay_state.visible => {
+                        overlay_state.navigate(1, model);
+                        needs_redraw = true;
+                    }
+                    TermKey::Left if overlay_state.visible => {
+                        if overlay::adjust_param(&mut current_params, overlay_state.selected, -1, false, model) {
+                            let _ = param_tx.send(current_params.clone());
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                        }
+                        needs_redraw = true;
+                    }
+                    TermKey::Right if overlay_state.visible => {
+                        if overlay::adjust_param(&mut current_params, overlay_state.selected, 1, false, model) {
+                            let _ = param_tx.send(current_params.clone());
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                        }
+                        needs_redraw = true;
+                    }
+                    TermKey::Comma if overlay_state.visible => {
+                        if overlay::adjust_param(&mut current_params, overlay_state.selected, -1, true, model) {
+                            let _ = param_tx.send(current_params.clone());
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                        }
+                        needs_redraw = true;
+                    }
+                    TermKey::Period if overlay_state.visible => {
+                        if overlay::adjust_param(&mut current_params, overlay_state.selected, 1, true, model) {
+                            let _ = param_tx.send(current_params.clone());
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                        }
+                        needs_redraw = true;
+                    }
+                    TermKey::Char('r') if overlay_state.visible => {
+                        overlay::reset_param(&mut current_params, overlay_state.selected, model);
+                        let _ = param_tx.send(current_params.clone());
+                        status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                        needs_redraw = true;
+                    }
+                    TermKey::Char('m') => {
+                        // Save current params for old model
+                        match model {
+                            state::FluidModel::RayleighBenard => rb_params = current_params.clone(),
+                            state::FluidModel::KarmanVortex => karman_params = current_params.clone(),
+                        }
+                        model = match model {
+                            state::FluidModel::RayleighBenard => state::FluidModel::KarmanVortex,
+                            state::FluidModel::KarmanVortex => state::FluidModel::RayleighBenard,
+                        };
+                        current_params = match model {
+                            state::FluidModel::KarmanVortex => karman_params.clone(),
+                            _ => rb_params.clone(),
+                        };
+                        tiles = match model {
+                            state::FluidModel::KarmanVortex => 1,
+                            _ => rb_tiles,
+                        };
+                        let new_nx = compute_sim_nx(win_width, win_height, model);
+                        let new_sim = match model {
+                            state::FluidModel::KarmanVortex => state::SimState::new_karman(
+                                num_particles,
+                                current_params.inflow_vel,
+                                current_params.cylinder_x,
+                                current_params.cylinder_y,
+                                current_params.cylinder_radius,
+                                new_nx,
+                            ),
+                            _ => state::SimState::new(num_particles, current_params.bottom_base, new_nx),
+                        };
+                        let _ = reset_tx.send((model, new_sim));
+                        let _ = param_tx.send(current_params.clone());
+                        overlay_state.selected = 0;
+                        render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, new_nx);
+                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+                        last_snap = None;
+                        needs_redraw = true;
+                    }
+                    TermKey::Char('v') => {
+                        show_vorticity = !show_vorticity;
+                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+                        needs_redraw = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Shift unconsumed bytes to front
+        if cursor > 0 && cursor < stdin_pending {
+            stdin_buf.copy_within(cursor..stdin_pending, 0);
+        }
+        stdin_pending -= cursor;
+
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // --- Non-blocking: grab latest snapshot ---
+        let mut snap = None;
+        while let Ok(s) = snap_rx.try_recv() {
+            snap = Some(s);
+        }
+
+        if let Some(s) = snap {
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, show_vorticity);
+            renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
+            overlay::render_overlay(
+                &mut rgba_buf,
+                render_cfg.frame_width,
+                render_cfg.display_width,
+                render_cfg.display_height,
+                &overlay_state,
+                &current_params,
+                model,
+            );
+
+            let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height);
+            let _ = write!(out, "\x1b[H");
+            let _ = out.write_all(seq);
+            let _ = out.flush();
+            last_snap = Some(s);
+            needs_redraw = false;
+        } else if needs_redraw {
+            if let Some(ref s) = last_snap {
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, show_vorticity);
+                renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
+                overlay::render_overlay(
+                    &mut rgba_buf,
+                    render_cfg.frame_width,
+                    render_cfg.display_width,
+                    render_cfg.display_height,
+                    &overlay_state,
+                    &current_params,
+                    model,
+                );
+
+                let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height);
+                let _ = write!(out, "\x1b[H");
+                let _ = out.write_all(seq);
+                let _ = out.flush();
+            }
+            needs_redraw = false;
+        }
 
         // Rate limit to ~30fps
         let elapsed = frame_start.elapsed();
@@ -657,7 +855,7 @@ fn run_headless() {
         }
     }
 
-    // Terminal restore
+    // Terminal restore (raw mode restored by _raw_guard drop)
     let _ = write!(out, "\x1b[?25h"); // show cursor
     let _ = write!(out, "\x1b[?1049l"); // restore main screen
     let _ = out.flush();
