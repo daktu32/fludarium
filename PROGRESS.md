@@ -1,8 +1,8 @@
 # fluvarium Progress
 
-## Current Status: Dual-Model Fluid Simulator with Headless Terminal Mode
+## Current Status: Dual-Model Fluid Simulator with Headless Terminal Mode + Keyboard Controls
 
-108 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel. Headless terminal rendering via iTerm2 Graphics Protocol. No external config files — all defaults in code.
+129 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls. No external config files — all defaults in code.
 
 ## Completed
 
@@ -80,6 +80,22 @@
 - **Dependencies**: `png = "0.17"`, `base64 = "0.22"`
 - **main.rs refactor**: `run_gui()` (existing) + `run_headless()` (new) dispatched from `main()`
 
+### Sub-issue 11: Headless Keyboard Controls
+- **TermKey enum + parse_key()**: Terminal escape sequence parser for raw stdin bytes
+  - ESC[A/B/C/D → arrow keys, bare ESC → Escape, Space/Comma/Period/q/r/m/v
+  - Incremental buffer parsing with `(Option<TermKey>, bytes_consumed)` return
+- **raw_term module**: macOS termios FFI for terminal raw mode
+  - RAII `RawTerminal` guard (disable ICANON/ECHO, VMIN=0/VTIME=0, keep ISIG for Ctrl+C)
+  - Non-blocking `read_stdin()` via fcntl O_NONBLOCK
+  - Non-macOS stubs
+- **run_headless() refactor**: Full keyboard support matching GUI mode
+  - `param_tx`/`param_rx` + `reset_tx`/`reset_rx` channels to physics thread
+  - Overlay panel: Space=toggle, Up/Down=nav, Left/Right=adjust, Comma/Period=fine, R=reset
+  - Model switch (M) with per-model param storage (`rb_params`/`karman_params`)
+  - Vorticity toggle (V), quit (q/Escape)
+  - Non-blocking `try_recv()` + keyboard polling loop at ~30fps
+- **20 new tests**: 18 parse_key + 2 raw_term smoke tests
+
 ### Config simplification
 - Removed YAML config system (`config.rs`, `serde`/`serde_yaml` dependencies)
 - All defaults managed in code: `SolverParams::default()`, `default_karman()`, `PARAM_DEFS_*`
@@ -118,8 +134,9 @@
 - Sixel encoder gated behind `#[cfg(test)]`
 
 ## Test Summary
-- **108 tests, all passing** (1 ignored: diagnostic)
-- `cargo test` and `cargo build --release` both succeed with 0 warnings
+- **129 tests, all passing** (1 ignored: diagnostic)
+- Includes 18 parse_key tests + 2 raw_term smoke tests
+- `cargo test` succeeds with 0 failures
 
 ## Next Steps
 - Fine-tune convection dynamics (plume count, speed, visual appeal)
