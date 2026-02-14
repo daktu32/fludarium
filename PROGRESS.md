@@ -149,8 +149,12 @@
 - **Step 2.2**: Extracted `interpolate_velocity()` in solver.rs — shared bilinear velocity interpolation between `advect_particles` and `advect_particles_karman`, with 2 precision tests
 - **Phase 3 (YAGNI)**: Deferred trait-based abstractions until 3rd model per Kent Beck's Rule of Three
 
+### Legacy Cleanup
+- Removed `src/sixel.rs` and `icy_sixel` dependency (test-only legacy, replaced by iTerm2 protocol)
+- Removed `REVIEW-fluid-simulation.md` (outdated review document)
+
 ## Test Summary
-- **148 tests, all passing** (1 ignored: diagnostic)
+- **140 tests, all passing** (1 ignored: diagnostic)
 - Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test
 - ModelParams save_and_switch test + 2 interpolate_velocity precision tests
 - `cargo test` succeeds with 0 failures
