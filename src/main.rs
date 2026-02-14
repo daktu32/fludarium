@@ -5,7 +5,7 @@ mod sixel;
 mod solver;
 mod state;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -196,7 +196,27 @@ fn compute_sim_nx(win_w: usize, win_h: usize, model: state::FluidModel) -> usize
     }
 }
 
-fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usize, panel_visible: bool, model: state::FluidModel, show_vorticity: bool) -> String {
+/// Create a SimState for the given model, dispatching to the appropriate constructor.
+fn create_sim_state(
+    model: state::FluidModel,
+    params: &solver::SolverParams,
+    num_particles: usize,
+    nx: usize,
+) -> state::SimState {
+    match model {
+        state::FluidModel::KarmanVortex => state::SimState::new_karman(
+            num_particles,
+            params.inflow_vel,
+            params.cylinder_x,
+            params.cylinder_y,
+            params.cylinder_radius,
+            nx,
+        ),
+        _ => state::SimState::new(num_particles, params.bottom_base, nx),
+    }
+}
+
+fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usize, panel_visible: bool, model: state::FluidModel, viz_mode: renderer::VizMode) -> String {
     if panel_visible {
         "space=close  ud=nav  lr=adj  ,.=fine  r=reset".to_string()
     } else {
@@ -209,7 +229,12 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
             ),
             state::FluidModel::KarmanVortex => {
                 let re = params.inflow_vel * (params.cylinder_radius * 2.0) / params.visc;
-                let viz = if show_vorticity { "vorticity" } else { "dye" };
+                let viz = match viz_mode {
+                    renderer::VizMode::Field => "dye",
+                    renderer::VizMode::Vorticity => "vorticity",
+                    renderer::VizMode::Streamline => "streamline",
+                    renderer::VizMode::None => "none",
+                };
                 format!(
                     "karman [{viz}] | visc={:.3} dt={:.3} u0={:.2} re={:.0} | p={} | space=params v=viz m=model",
                     params.visc, params.dt, params.inflow_vel, re, num_particles,
@@ -223,6 +248,60 @@ fn is_headless() -> bool {
     std::env::args().any(|a| a == "--headless")
 }
 
+/// Parse `--bgm <URL>` from CLI args.
+fn parse_bgm_url() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .find(|w| w[0] == "--bgm")
+        .map(|w| w[1].clone())
+}
+
+/// Global PID for the bgm child process, so atexit/signal handlers can kill it.
+static BGM_PID: AtomicI32 = AtomicI32::new(0);
+
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn atexit(func: extern "C" fn()) -> i32;
+}
+
+/// Called by atexit and signal handlers — kills bgm process by stored PID.
+extern "C" fn kill_bgm_process() {
+    let pid = BGM_PID.swap(0, Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            kill(pid, 9); // SIGKILL
+            waitpid(pid, std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+/// RAII guard that kills the bgm process on drop (backup for atexit).
+struct BgmGuard;
+
+impl Drop for BgmGuard {
+    fn drop(&mut self) {
+        kill_bgm_process();
+    }
+}
+
+/// Spawn mpv for background music playback. Kills are guaranteed by three layers:
+/// 1. `atexit` — runs even on `exit()` / framework-driven termination (macOS Cmd+Q)
+/// 2. `ctrlc` handler — runs on SIGINT/SIGTERM
+/// 3. `BgmGuard::drop` — runs on normal scope exit or panic unwind
+fn spawn_bgm(url: &str) -> Option<BgmGuard> {
+    let child = std::process::Command::new("mpv")
+        .args(["--no-video", "--really-quiet", url])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    BGM_PID.store(child.id() as i32, Ordering::SeqCst);
+    unsafe { atexit(kill_bgm_process); }
+    Some(BgmGuard)
+}
+
 fn main() {
     if is_headless() {
         run_headless();
@@ -232,6 +311,8 @@ fn main() {
 }
 
 fn run_gui() {
+    let bgm_child = parse_bgm_url().and_then(|url| spawn_bgm(&url));
+
     let mut model = Defaults::MODEL;
     let win_width = Defaults::WIN_WIDTH;
     let win_height = Defaults::WIN_HEIGHT;
@@ -246,8 +327,8 @@ fn run_gui() {
     let mut rb_params = solver::SolverParams::default();
     let mut karman_params = solver::SolverParams::default_karman();
     let mut current_params = karman_params.clone();
-    let mut show_vorticity = false;
-    let mut status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
+    let mut viz_mode = renderer::VizMode::Field;
+    let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
     let sim_nx = compute_sim_nx(win_width, win_height, model);
     let mut render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, sim_nx);
@@ -255,7 +336,7 @@ fn run_gui() {
     let mut h = render_cfg.frame_height;
 
     let mut window = Window::new(
-        "fluvarium",
+        "fludarium",
         w,
         h,
         WindowOptions {
@@ -271,6 +352,7 @@ fn run_gui() {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
+        kill_bgm_process();
         r.store(false, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl+C handler");
@@ -288,17 +370,7 @@ fn run_gui() {
     let init_params = current_params.clone();
     let physics_thread = std::thread::spawn(move || {
         let mut cur_model = model;
-        let mut sim = match cur_model {
-            state::FluidModel::KarmanVortex => state::SimState::new_karman(
-                num_particles,
-                init_params.inflow_vel,
-                init_params.cylinder_x,
-                init_params.cylinder_y,
-                init_params.cylinder_radius,
-                sim_nx,
-            ),
-            _ => state::SimState::new(num_particles, init_params.bottom_base, sim_nx),
-        };
+        let mut sim = create_sim_state(cur_model, &init_params, num_particles, sim_nx);
         let mut params = init_params;
         let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
 
@@ -353,7 +425,7 @@ fn run_gui() {
         if window.is_key_pressed(Key::Escape, KeyRepeat::No) {
             if overlay_state.visible {
                 overlay_state.visible = false;
-                status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
+                status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
                 needs_redraw = true;
             } else {
                 break;
@@ -363,7 +435,7 @@ fn run_gui() {
         // Space: toggle overlay
         if window.is_key_pressed(Key::Space, KeyRepeat::No) {
             overlay_state.toggle();
-            status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+            status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
             needs_redraw = true;
         }
 
@@ -382,14 +454,14 @@ fn run_gui() {
             if window.is_key_pressed(Key::Left, KeyRepeat::Yes) {
                 if overlay::adjust_param(&mut current_params, overlay_state.selected, -1, false, model) {
                     let _ = param_tx.send(current_params.clone());
-                    status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                    status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                 }
                 needs_redraw = true;
             }
             if window.is_key_pressed(Key::Right, KeyRepeat::Yes) {
                 if overlay::adjust_param(&mut current_params, overlay_state.selected, 1, false, model) {
                     let _ = param_tx.send(current_params.clone());
-                    status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                    status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                 }
                 needs_redraw = true;
             }
@@ -398,14 +470,14 @@ fn run_gui() {
             if window.is_key_pressed(Key::Comma, KeyRepeat::Yes) {
                 if overlay::adjust_param(&mut current_params, overlay_state.selected, -1, true, model) {
                     let _ = param_tx.send(current_params.clone());
-                    status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                    status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                 }
                 needs_redraw = true;
             }
             if window.is_key_pressed(Key::Period, KeyRepeat::Yes) {
                 if overlay::adjust_param(&mut current_params, overlay_state.selected, 1, true, model) {
                     let _ = param_tx.send(current_params.clone());
-                    status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                    status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                 }
                 needs_redraw = true;
             }
@@ -414,7 +486,7 @@ fn run_gui() {
             if window.is_key_pressed(Key::R, KeyRepeat::No) {
                 overlay::reset_param(&mut current_params, overlay_state.selected, model);
                 let _ = param_tx.send(current_params.clone());
-                status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                 needs_redraw = true;
             }
         }
@@ -442,17 +514,7 @@ fn run_gui() {
             // Compute NX from current window size
             let (cur_w, cur_h) = window.get_size();
             let new_nx = compute_sim_nx(cur_w, cur_h, model);
-            let new_sim = match model {
-                state::FluidModel::KarmanVortex => state::SimState::new_karman(
-                    num_particles,
-                    current_params.inflow_vel,
-                    current_params.cylinder_x,
-                    current_params.cylinder_y,
-                    current_params.cylinder_radius,
-                    new_nx,
-                ),
-                _ => state::SimState::new(num_particles, current_params.bottom_base, new_nx),
-            };
+            let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
             let _ = reset_tx.send((model, new_sim));
             let _ = param_tx.send(current_params.clone());
             overlay_state.selected = 0;
@@ -461,23 +523,29 @@ fn run_gui() {
             w = render_cfg.frame_width;
             h = render_cfg.frame_height;
             framebuf = vec![0u32; w * h];
-            status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+            status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
             last_snap = None;
             needs_redraw = true;
         }
 
-        // V: toggle vorticity visualization
+        // V: cycle visualization mode
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
-            show_vorticity = !show_vorticity;
-            status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+            viz_mode = viz_mode.next();
+            status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
             needs_redraw = true;
         }
 
         // --- Check for window resize ---
         let (new_w, new_h) = window.get_size();
         if new_w != w || new_h != h {
-            // Stretch absorbs resize; NX stays the same
-            render_cfg = renderer::RenderConfig::fit(new_w, new_h, tiles, render_cfg.sim_nx);
+            let new_nx = compute_sim_nx(new_w, new_h, model);
+            if new_nx != render_cfg.sim_nx {
+                // Grid width changed — reset simulation to match new aspect ratio
+                let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
+                let _ = reset_tx.send((model, new_sim));
+                last_snap = None;
+            }
+            render_cfg = renderer::RenderConfig::fit(new_w, new_h, tiles, new_nx);
             w = render_cfg.frame_width;
             h = render_cfg.frame_height;
             framebuf = vec![0u32; w * h];
@@ -491,7 +559,7 @@ fn run_gui() {
         }
 
         if let Some(s) = snap {
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, show_vorticity);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -511,7 +579,7 @@ fn run_gui() {
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, show_vorticity);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode);
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -535,7 +603,7 @@ fn run_gui() {
             display_fps = frame_count;
             frame_count = 0;
             last_fps_time = now;
-            window.set_title(&format!("fluvarium — {display_fps} fps"));
+            window.set_title(&format!("fludarium — {display_fps} fps"));
         }
     }
 
@@ -543,6 +611,7 @@ fn run_gui() {
     running.store(false, Ordering::SeqCst);
     drop(snap_rx);
     let _ = physics_thread.join();
+    drop(bgm_child); // BgmGuard::drop kills mpv
 }
 
 /// Query terminal pixel dimensions via TIOCGWINSZ ioctl.
@@ -597,6 +666,8 @@ fn headless_render_dims(term_w: usize, term_h: usize) -> (usize, usize, f64) {
 fn run_headless() {
     use std::io::Write;
 
+    let bgm_child = parse_bgm_url().and_then(|url| spawn_bgm(&url));
+
     let mut model = Defaults::MODEL;
     let (mut term_width, mut term_height) = query_terminal_pixel_size()
         .unwrap_or((Defaults::HEADLESS_WIDTH, Defaults::HEADLESS_HEIGHT));
@@ -619,8 +690,8 @@ fn run_headless() {
         state::FluidModel::KarmanVortex => karman_params.clone(),
         _ => rb_params.clone(),
     };
-    let mut show_vorticity = false;
-    let mut status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
+    let mut viz_mode = renderer::VizMode::Field;
+    let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
     // sim_nx based on terminal aspect ratio (not reduced render dims)
     let sim_nx = compute_sim_nx(term_width, term_height, model);
@@ -633,6 +704,7 @@ fn run_headless() {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
+        kill_bgm_process();
         r.store(false, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl+C handler");
@@ -650,17 +722,7 @@ fn run_headless() {
     let init_params = current_params.clone();
     let physics_thread = std::thread::spawn(move || {
         let mut cur_model = model;
-        let mut sim = match cur_model {
-            state::FluidModel::KarmanVortex => state::SimState::new_karman(
-                num_particles,
-                init_params.inflow_vel,
-                init_params.cylinder_x,
-                init_params.cylinder_y,
-                init_params.cylinder_radius,
-                sim_nx,
-            ),
-            _ => state::SimState::new(num_particles, init_params.bottom_base, sim_nx),
-        };
+        let mut sim = create_sim_state(cur_model, &init_params, num_particles, sim_nx);
         let mut params = init_params;
         let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
 
@@ -737,7 +799,7 @@ fn run_headless() {
                     TermKey::Escape => {
                         if overlay_state.visible {
                             overlay_state.visible = false;
-                            status_text = format_status(&current_params, tiles, num_particles, false, model, show_vorticity);
+                            status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
                             needs_redraw = true;
                         } else {
                             running.store(false, Ordering::SeqCst);
@@ -748,7 +810,7 @@ fn run_headless() {
                     }
                     TermKey::Space => {
                         overlay_state.toggle();
-                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
                         needs_redraw = true;
                     }
                     TermKey::Up if overlay_state.visible => {
@@ -762,35 +824,35 @@ fn run_headless() {
                     TermKey::Left if overlay_state.visible => {
                         if overlay::adjust_param(&mut current_params, overlay_state.selected, -1, false, model) {
                             let _ = param_tx.send(current_params.clone());
-                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                         }
                         needs_redraw = true;
                     }
                     TermKey::Right if overlay_state.visible => {
                         if overlay::adjust_param(&mut current_params, overlay_state.selected, 1, false, model) {
                             let _ = param_tx.send(current_params.clone());
-                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                         }
                         needs_redraw = true;
                     }
                     TermKey::Comma if overlay_state.visible => {
                         if overlay::adjust_param(&mut current_params, overlay_state.selected, -1, true, model) {
                             let _ = param_tx.send(current_params.clone());
-                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                         }
                         needs_redraw = true;
                     }
                     TermKey::Period if overlay_state.visible => {
                         if overlay::adjust_param(&mut current_params, overlay_state.selected, 1, true, model) {
                             let _ = param_tx.send(current_params.clone());
-                            status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                            status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                         }
                         needs_redraw = true;
                     }
                     TermKey::Char('r') if overlay_state.visible => {
                         overlay::reset_param(&mut current_params, overlay_state.selected, model);
                         let _ = param_tx.send(current_params.clone());
-                        status_text = format_status(&current_params, tiles, num_particles, true, model, show_vorticity);
+                        status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
                         needs_redraw = true;
                     }
                     TermKey::Char('m') => {
@@ -812,17 +874,7 @@ fn run_headless() {
                             _ => rb_tiles,
                         };
                         let new_nx = compute_sim_nx(term_width, term_height, model);
-                        let new_sim = match model {
-                            state::FluidModel::KarmanVortex => state::SimState::new_karman(
-                                num_particles,
-                                current_params.inflow_vel,
-                                current_params.cylinder_x,
-                                current_params.cylinder_y,
-                                current_params.cylinder_radius,
-                                new_nx,
-                            ),
-                            _ => state::SimState::new(num_particles, current_params.bottom_base, new_nx),
-                        };
+                        let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
                         let _ = reset_tx.send((model, new_sim));
                         let _ = param_tx.send(current_params.clone());
                         overlay_state.selected = 0;
@@ -830,13 +882,13 @@ fn run_headless() {
                         if render_scale < 1.0 {
                             render_cfg.particle_radius = 0;
                         }
-                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
                         last_snap = None;
                         needs_redraw = true;
                     }
                     TermKey::Char('v') => {
-                        show_vorticity = !show_vorticity;
-                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, show_vorticity);
+                        viz_mode = viz_mode.next();
+                        status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
                         needs_redraw = true;
                     }
                     _ => {}
@@ -878,7 +930,7 @@ fn run_headless() {
         }
 
         if let Some(s) = snap {
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, show_vorticity);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -902,7 +954,7 @@ fn run_headless() {
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, show_vorticity);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode);
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -938,6 +990,7 @@ fn run_headless() {
     running.store(false, Ordering::SeqCst);
     drop(snap_rx);
     let _ = physics_thread.join();
+    drop(bgm_child); // BgmGuard::drop kills mpv
 }
 
 #[cfg(test)]
@@ -953,7 +1006,7 @@ mod tests {
         for _ in 0..3 {
             solver::fluid_step(&mut sim, &params);
             let snap = sim.snapshot();
-            let rgba = renderer::render(&snap, &cfg, false);
+            let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field);
             let result = sixel::encode_sixel(&rgba, cfg.frame_width, cfg.frame_height);
             assert!(result.is_ok(), "Sixel encoding should succeed");
             let data = result.unwrap();
@@ -971,7 +1024,7 @@ mod tests {
         for _ in 0..3 {
             solver::fluid_step_karman(&mut sim, &params);
             let snap = sim.snapshot();
-            let rgba = renderer::render(&snap, &cfg, false);
+            let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field);
             assert_eq!(rgba.len(), cfg.frame_width * cfg.frame_height * 4);
         }
     }
@@ -1011,6 +1064,36 @@ mod tests {
     }
 
     #[test]
+    fn test_karman_resize_preserves_aspect_ratio() {
+        // After resize, recomputing sim_nx should keep scale_x ≈ scale_y
+        // Landscape/square windows where sim_nx >= N naturally holds
+        let sizes: [(usize, usize); 4] = [
+            (640, 320), (800, 400), (1024, 512), (800, 600),
+        ];
+        for (w, h) in sizes {
+            let nx = compute_sim_nx(w, h, state::FluidModel::KarmanVortex);
+            let cfg = renderer::RenderConfig::fit(w, h, 1, nx);
+            let sx = cfg.scale_x();
+            let sy = cfg.scale_y();
+            let ratio = sx / sy;
+            assert!((ratio - 1.0).abs() < 0.15,
+                "scale_x/scale_y should be ~1.0 for {w}x{h}, got {ratio:.3} (sx={sx:.2}, sy={sy:.2}, nx={nx})");
+        }
+    }
+
+    #[test]
+    fn test_karman_stale_nx_causes_distortion() {
+        // If sim_nx is NOT recalculated after resize, scales diverge
+        let initial_nx = compute_sim_nx(640, 320, state::FluidModel::KarmanVortex);
+        // Simulate resize to a very different aspect ratio without updating nx
+        let cfg = renderer::RenderConfig::fit(1200, 400, 1, initial_nx);
+        let ratio = cfg.scale_x() / cfg.scale_y();
+        // With stale nx, ratio deviates significantly from 1.0
+        assert!((ratio - 1.0).abs() > 0.3,
+            "Stale sim_nx should cause distortion, got ratio={ratio:.3}");
+    }
+
+    #[test]
     fn test_headless_iterm2_pipeline() {
         // End-to-end: physics → render → iterm2 encode
         let params = solver::SolverParams::default_karman();
@@ -1023,7 +1106,7 @@ mod tests {
 
         solver::fluid_step_karman(&mut sim, &params);
         let snap = sim.snapshot();
-        let rgba = renderer::render(&snap, &cfg, false);
+        let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field);
 
         let mut encoder = iterm2::Iterm2Encoder::new();
         let seq = encoder.encode(&rgba, cfg.frame_width, cfg.frame_height, 640, 320);
