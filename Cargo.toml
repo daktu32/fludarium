@@ -2,6 +2,12 @@
 name = "fludarium"
 version = "0.1.0"
 edition = "2024"
+authors = ["daktu32"]
+description = "Real-time fluid dynamics visualizer — Rayleigh-Bénard convection & Kármán vortex street"
+license = "MIT"
+repository = "https://github.com/daktu32/fludarium"
+keywords = ["fluid-dynamics", "cfd", "simulation", "visualization"]
+categories = ["simulation", "visualization"]
 
 [dependencies]
 ctrlc = "3.4"
