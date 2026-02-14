@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-fluvarium is a fluid dynamics visualizer supporting multiple simulation models: Rayleigh-Benard convection (thermal plumes) and Karman vortex street (flow past a cylinder). Renders via minifb native window with real-time parameter tuning, or headless in terminal via iTerm2 Graphics Protocol (`--headless`). Written in Rust (edition 2024), single crate, no external C dependencies.
+fludarium is a fluid dynamics visualizer supporting multiple simulation models: Rayleigh-Benard convection (thermal plumes) and Karman vortex street (flow past a cylinder). Renders via minifb native window with real-time parameter tuning, or headless in terminal via iTerm2 Graphics Protocol (`--headless`). Written in Rust (edition 2024), single crate, no external C dependencies.
 
 ## Build & Test Commands
 

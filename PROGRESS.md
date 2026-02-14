@@ -1,8 +1,8 @@
 # fludarium Progress
 
-## Current Status: Dual-Model Fluid Simulator with Optimized Headless Terminal Mode
+## Current Status: Modularized Dual-Model Fluid Simulator
 
-135 tests passing. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. No external config files — all defaults in code.
+140 tests passing. Codebase modularized into directory-based modules: `solver/` (7 files), `renderer/` (3 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. No external config files — all defaults in code.
 
 ## Completed
 
@@ -152,6 +152,26 @@
 ### Legacy Cleanup
 - Removed `src/sixel.rs` and `icy_sixel` dependency (test-only legacy, replaced by iTerm2 protocol)
 - Removed `REVIEW-fluid-simulation.md` (outdated review document)
+
+### Module Structure Refactoring
+- **`solver.rs` (1621行) → `src/solver/` ディレクトリモジュール (7ファイル)**:
+  - `mod.rs` (446): fluid_step(), fluid_step_karman(), pub re-exports, integration tests
+  - `boundary.rs` (268): FieldType, BoundaryConfig, set_bnd(), set_bnd_rb(), set_bnd_karman()
+  - `core.rs` (314): lin_solve(), diffuse(), advect(), project()
+  - `params.rs` (85): SolverParams struct + Default + default_karman()
+  - `thermal.rs` (106): inject_thermal_perturbation(), inject_heat_source(), apply_buoyancy()
+  - `particle.rs` (224): interpolate_velocity(), advect_particles(), advect_particles_karman()
+  - `karman.rs` (240): apply_mask(), inject_inflow(), inject_dye(), vorticity_confinement()
+- **`renderer.rs` (1230行) → `src/renderer/` ディレクトリモジュール (3ファイル)**:
+  - `mod.rs` (926): VizMode, RenderConfig, render_into(), render(), compute_vorticity(), particle rendering
+  - `font.rs` (236): 5×7 bitmap font, glyph(), draw_text(), draw_text_sized(), render_status()
+  - `color.rs` (92): Tokyo Night colormap (COLOR_STOPS, temperature_to_rgba()), color bar constants
+- **`main.rs` (1283行) → 分割 (3ファイル)**:
+  - `input.rs` (190): TermKey enum + parse_key() + 18 tests
+  - `physics.rs` (190): PhysicsChannels, spawn_physics_thread(), ModelParams, create_sim_state()
+  - `main.rs` (925): run_gui(), run_headless(), raw_term, integration tests
+- Public API preserved — no changes needed in consuming code
+- Multi-agent parallel refactoring (3 rust-architect agents working simultaneously)
 
 ## Test Summary
 - **140 tests, all passing** (1 ignored: diagnostic)

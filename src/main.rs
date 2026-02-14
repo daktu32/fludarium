@@ -1,15 +1,18 @@
+mod input;
 mod iterm2;
 mod overlay;
+mod physics;
 mod renderer;
 mod solver;
 mod state;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use input::{parse_key, TermKey};
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
+use physics::{compute_sim_nx, create_sim_state, ModelParams, PhysicsChannels, spawn_physics_thread};
 use state::FrameSnapshot;
 
 struct Defaults;
@@ -28,56 +31,6 @@ impl Defaults {
     /// Max pixel count for headless render resolution (~200K pixels).
     /// Terminal upscales via iTerm2's width/height parameters.
     const HEADLESS_MAX_RENDER_PIXELS: usize = 640 * 320;
-}
-
-/// Terminal key event parsed from raw stdin bytes.
-#[derive(Debug, Clone, PartialEq)]
-enum TermKey {
-    Space,
-    Escape,
-    Up,
-    Down,
-    Left,
-    Right,
-    Comma,
-    Period,
-    Char(char),
-}
-
-/// Parse a terminal key from raw bytes.
-/// Returns `(parsed_key, bytes_consumed)`. `consumed=0` means need more data.
-fn parse_key(buf: &[u8]) -> (Option<TermKey>, usize) {
-    if buf.is_empty() {
-        return (None, 0);
-    }
-    match buf[0] {
-        0x1b => {
-            // ESC sequence
-            if buf.len() < 2 {
-                return (Some(TermKey::Escape), 1);
-            }
-            if buf[1] != b'[' {
-                return (Some(TermKey::Escape), 1);
-            }
-            // CSI sequence: ESC [ <final>
-            if buf.len() < 3 {
-                return (None, 0); // need more data
-            }
-            let key = match buf[2] {
-                b'A' => Some(TermKey::Up),
-                b'B' => Some(TermKey::Down),
-                b'C' => Some(TermKey::Right),
-                b'D' => Some(TermKey::Left),
-                _ => None,
-            };
-            (key, 3)
-        }
-        0x20 => (Some(TermKey::Space), 1),
-        b',' => (Some(TermKey::Comma), 1),
-        b'.' => (Some(TermKey::Period), 1),
-        b'q' | b'r' | b'm' | b'v' => (Some(TermKey::Char(buf[0] as char)), 1),
-        _ => (None, 1),
-    }
 }
 
 /// Terminal raw mode via termios FFI (macOS only).
@@ -179,139 +132,6 @@ fn rgba_to_argb(rgba: &[u8], out: &mut [u32]) {
     for (i, pixel) in rgba.chunks_exact(4).enumerate() {
         out[i] = (pixel[0] as u32) << 16 | (pixel[1] as u32) << 8 | pixel[2] as u32;
     }
-}
-
-/// Compute simulation grid width from window dimensions and model.
-/// Karman: NX = N × (win_w / win_h), clamped to at least N.
-/// RB: always N (tiles handle horizontal extent).
-fn compute_sim_nx(win_w: usize, win_h: usize, model: state::FluidModel) -> usize {
-    match model {
-        state::FluidModel::KarmanVortex => {
-            let aspect = win_w as f64 / win_h as f64;
-            let nx = (state::N as f64 * aspect).round() as usize;
-            nx.max(state::N)
-        }
-        _ => state::N,
-    }
-}
-
-/// Create a SimState for the given model, dispatching to the appropriate constructor.
-fn create_sim_state(
-    model: state::FluidModel,
-    params: &solver::SolverParams,
-    num_particles: usize,
-    nx: usize,
-) -> state::SimState {
-    match model {
-        state::FluidModel::KarmanVortex => state::SimState::new_karman(
-            num_particles,
-            params.inflow_vel,
-            params.cylinder_x,
-            params.cylinder_y,
-            params.cylinder_radius,
-            nx,
-        ),
-        _ => state::SimState::new(num_particles, params.bottom_base, nx),
-    }
-}
-
-/// Per-model parameter storage with save/restore on model switch.
-struct ModelParams {
-    rb: solver::SolverParams,
-    karman: solver::SolverParams,
-}
-
-impl ModelParams {
-    fn new() -> Self {
-        Self {
-            rb: solver::SolverParams::default(),
-            karman: solver::SolverParams::default_karman(),
-        }
-    }
-
-    fn get(&self, model: state::FluidModel) -> &solver::SolverParams {
-        match model {
-            state::FluidModel::KarmanVortex => &self.karman,
-            _ => &self.rb,
-        }
-    }
-
-    /// Save current params for old_model, toggle to new model, return (new_model, restored_params).
-    fn save_and_switch(
-        &mut self,
-        current: &solver::SolverParams,
-        old_model: state::FluidModel,
-    ) -> (state::FluidModel, solver::SolverParams) {
-        match old_model {
-            state::FluidModel::RayleighBenard => self.rb = current.clone(),
-            state::FluidModel::KarmanVortex => self.karman = current.clone(),
-        }
-        let new_model = match old_model {
-            state::FluidModel::RayleighBenard => state::FluidModel::KarmanVortex,
-            state::FluidModel::KarmanVortex => state::FluidModel::RayleighBenard,
-        };
-        let restored = self.get(new_model).clone();
-        (new_model, restored)
-    }
-}
-
-/// Channels connecting the main (render) thread to the physics thread.
-struct PhysicsChannels {
-    param_tx: mpsc::Sender<solver::SolverParams>,
-    reset_tx: mpsc::Sender<(state::FluidModel, state::SimState)>,
-    snap_rx: mpsc::Receiver<FrameSnapshot>,
-    snap_return_tx: mpsc::Sender<FrameSnapshot>,
-}
-
-/// Spawn the physics simulation thread and return its channels + join handle.
-fn spawn_physics_thread(
-    model: state::FluidModel,
-    params: solver::SolverParams,
-    num_particles: usize,
-    sim_nx: usize,
-    steps_per_frame: usize,
-    running: Arc<AtomicBool>,
-) -> (PhysicsChannels, std::thread::JoinHandle<()>) {
-    let (param_tx, param_rx) = mpsc::channel::<solver::SolverParams>();
-    let (reset_tx, reset_rx) = mpsc::channel::<(state::FluidModel, state::SimState)>();
-    let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
-    let (snap_return_tx, snap_return_rx) = mpsc::channel::<FrameSnapshot>();
-
-    let handle = std::thread::spawn(move || {
-        let mut cur_model = model;
-        let mut sim = create_sim_state(cur_model, &params, num_particles, sim_nx);
-        let mut params = params;
-        let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
-
-        while running.load(Ordering::SeqCst) {
-            while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
-                cur_model = new_model;
-                sim = new_sim;
-                snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
-            }
-            while let Ok(new_params) = param_rx.try_recv() {
-                params = new_params;
-            }
-            for _ in 0..steps_per_frame {
-                match cur_model {
-                    state::FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
-                    _ => solver::fluid_step(&mut sim, &params),
-                }
-            }
-            sim.snapshot_into(&mut snap_buf);
-            if snap_tx.send(snap_buf).is_err() {
-                break;
-            }
-            let expected_len = sim.nx * state::N;
-            snap_buf = snap_return_rx.try_recv()
-                .ok()
-                .filter(|b| b.temperature.len() == expected_len)
-                .unwrap_or_else(|| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
-        }
-    });
-
-    let channels = PhysicsChannels { param_tx, reset_tx, snap_rx, snap_return_tx };
-    (channels, handle)
 }
 
 fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usize, panel_visible: bool, model: state::FluidModel, viz_mode: renderer::VizMode) -> String {
@@ -979,26 +799,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_model_params_save_and_switch() {
-        let mut mp = ModelParams::new();
-        let mut current = mp.get(state::FluidModel::KarmanVortex).clone();
-        // Modify a Karman param
-        current.visc = 0.999;
-        // Switch from Karman → RB
-        let (new_model, restored) = mp.save_and_switch(&current, state::FluidModel::KarmanVortex);
-        assert!(matches!(new_model, state::FluidModel::RayleighBenard));
-        // Restored should be RB defaults
-        assert!((restored.visc - solver::SolverParams::default().visc).abs() < 1e-10);
-        // Saved Karman params should have our modification
-        assert!((mp.karman.visc - 0.999).abs() < 1e-10);
-        // Switch back from RB → Karman
-        let (back_model, back_params) = mp.save_and_switch(&restored, new_model);
-        assert!(matches!(back_model, state::FluidModel::KarmanVortex));
-        // Should get our modified Karman visc back
-        assert!((back_params.visc - 0.999).abs() < 1e-10);
-    }
-
-    #[test]
     fn test_pipeline_no_panic() {
         let mut sim = state::SimState::new(400, 0.15, state::N);
         let params = solver::SolverParams::default();
@@ -1029,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_drain_latest_gets_newest() {
-        let (tx, rx) = mpsc::sync_channel::<i32>(10);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<i32>(10);
         for i in 0..3 {
             tx.send(i).unwrap();
         }
@@ -1039,26 +839,6 @@ mod tests {
             latest = newer;
         }
         assert_eq!(latest, 2, "Should get the last item sent");
-    }
-
-    #[test]
-    fn test_compute_sim_nx_rb() {
-        let nx = compute_sim_nx(800, 600, state::FluidModel::RayleighBenard);
-        assert_eq!(nx, state::N, "RB always uses N");
-    }
-
-    #[test]
-    fn test_compute_sim_nx_karman() {
-        let nx = compute_sim_nx(800, 400, state::FluidModel::KarmanVortex);
-        // aspect = 800/400 = 2.0, so nx = N * 2
-        assert_eq!(nx, state::N * 2);
-    }
-
-    #[test]
-    fn test_compute_sim_nx_karman_min() {
-        // Very tall window: aspect < 1
-        let nx = compute_sim_nx(200, 800, state::FluidModel::KarmanVortex);
-        assert_eq!(nx, state::N, "Karman NX should not go below N");
     }
 
     #[test]
@@ -1122,144 +902,6 @@ mod tests {
             assert!(w > 0);
             assert!(h > 0);
         }
-    }
-
-    // --- parse_key tests ---
-
-    #[test]
-    fn test_parse_key_empty() {
-        let (key, consumed) = parse_key(&[]);
-        assert_eq!(key, None);
-        assert_eq!(consumed, 0);
-    }
-
-    #[test]
-    fn test_parse_key_space() {
-        let (key, consumed) = parse_key(&[0x20]);
-        assert_eq!(key, Some(TermKey::Space));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_comma() {
-        let (key, consumed) = parse_key(&[b',']);
-        assert_eq!(key, Some(TermKey::Comma));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_period() {
-        let (key, consumed) = parse_key(&[b'.']);
-        assert_eq!(key, Some(TermKey::Period));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_char_q() {
-        let (key, consumed) = parse_key(&[b'q']);
-        assert_eq!(key, Some(TermKey::Char('q')));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_char_r() {
-        let (key, consumed) = parse_key(&[b'r']);
-        assert_eq!(key, Some(TermKey::Char('r')));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_char_m() {
-        let (key, consumed) = parse_key(&[b'm']);
-        assert_eq!(key, Some(TermKey::Char('m')));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_char_v() {
-        let (key, consumed) = parse_key(&[b'v']);
-        assert_eq!(key, Some(TermKey::Char('v')));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_arrow_up() {
-        let (key, consumed) = parse_key(&[0x1b, b'[', b'A']);
-        assert_eq!(key, Some(TermKey::Up));
-        assert_eq!(consumed, 3);
-    }
-
-    #[test]
-    fn test_parse_key_arrow_down() {
-        let (key, consumed) = parse_key(&[0x1b, b'[', b'B']);
-        assert_eq!(key, Some(TermKey::Down));
-        assert_eq!(consumed, 3);
-    }
-
-    #[test]
-    fn test_parse_key_arrow_right() {
-        let (key, consumed) = parse_key(&[0x1b, b'[', b'C']);
-        assert_eq!(key, Some(TermKey::Right));
-        assert_eq!(consumed, 3);
-    }
-
-    #[test]
-    fn test_parse_key_arrow_left() {
-        let (key, consumed) = parse_key(&[0x1b, b'[', b'D']);
-        assert_eq!(key, Some(TermKey::Left));
-        assert_eq!(consumed, 3);
-    }
-
-    #[test]
-    fn test_parse_key_escape_alone() {
-        // ESC followed by non-bracket byte → Escape key, consume 1
-        let (key, consumed) = parse_key(&[0x1b, b'x']);
-        assert_eq!(key, Some(TermKey::Escape));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_escape_only_byte() {
-        // Single ESC at end of buffer
-        let (key, consumed) = parse_key(&[0x1b]);
-        assert_eq!(key, Some(TermKey::Escape));
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_incomplete_csi() {
-        // ESC [ but no final byte → need more data
-        let (key, consumed) = parse_key(&[0x1b, b'[']);
-        assert_eq!(key, None);
-        assert_eq!(consumed, 0);
-    }
-
-    #[test]
-    fn test_parse_key_unknown_csi() {
-        // ESC [ with unknown final byte → skip 3 bytes
-        let (key, consumed) = parse_key(&[0x1b, b'[', b'Z']);
-        assert_eq!(key, None);
-        assert_eq!(consumed, 3);
-    }
-
-    #[test]
-    fn test_parse_key_unknown_byte() {
-        let (key, consumed) = parse_key(&[0x01]);
-        assert_eq!(key, None);
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_key_sequence_in_buffer() {
-        // Arrow up followed by space — parse_key should only consume the arrow
-        let buf = [0x1b, b'[', b'A', 0x20];
-        let (key, consumed) = parse_key(&buf);
-        assert_eq!(key, Some(TermKey::Up));
-        assert_eq!(consumed, 3);
-        // Second parse should get space
-        let (key2, consumed2) = parse_key(&buf[consumed..]);
-        assert_eq!(key2, Some(TermKey::Space));
-        assert_eq!(consumed2, 1);
     }
 
     // --- raw_term tests ---

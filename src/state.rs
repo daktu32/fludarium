@@ -127,6 +127,8 @@ impl SimState {
         }
     }
 
+    /// Allocating snapshot convenience method (used in tests).
+    #[cfg(any(test, debug_assertions))]
     pub fn snapshot(&mut self) -> FrameSnapshot {
         self.push_trail();
 
