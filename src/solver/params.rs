@@ -79,7 +79,7 @@ impl SolverParams {
         Self {
             visc: 0.001,
             diff: 0.0005,
-            dt: 0.1,
+            dt: 0.05,
             diffuse_iter: 20,
             project_iter: 30,
             heat_buoyancy: 0.0,

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use input::{parse_key, TermKey};
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use physics::{compute_sim_nx, create_sim_state, ModelParams, PhysicsChannels, spawn_physics_thread};
+use renderer::ColorMap;
 use state::FrameSnapshot;
 
 struct Defaults;
@@ -248,6 +249,11 @@ fn run_gui() {
     let mut model_params = ModelParams::new();
     let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
+    let mut colormap = match model {
+        state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
+        state::FluidModel::KarmanVortex => ColorMap::SolarWind,
+        _ => ColorMap::TokyoNight,
+    };
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
     let sim_nx = compute_sim_nx(win_width, win_height, model);
@@ -376,6 +382,11 @@ fn run_gui() {
                 state::FluidModel::KarmanVortex => 1,
                 _ => rb_tiles,
             };
+            colormap = match model {
+                state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
+                state::FluidModel::KarmanVortex => ColorMap::SolarWind,
+                _ => ColorMap::TokyoNight,
+            };
             let (cur_w, cur_h) = window.get_size();
             let new_nx = compute_sim_nx(cur_w, cur_h, model);
             let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
@@ -423,7 +434,7 @@ fn run_gui() {
         }
 
         if let Some(s) = snap {
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -443,7 +454,7 @@ fn run_gui() {
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap);
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -550,6 +561,11 @@ fn run_headless() {
     let mut model_params = ModelParams::new();
     let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
+    let mut colormap = match model {
+        state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
+        state::FluidModel::KarmanVortex => ColorMap::SolarWind,
+        _ => ColorMap::TokyoNight,
+    };
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
     // sim_nx based on terminal aspect ratio (not reduced render dims)
@@ -678,6 +694,10 @@ fn run_headless() {
                             state::FluidModel::KarmanVortex => 1,
                             _ => rb_tiles,
                         };
+                        colormap = match model {
+                            state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
+                            _ => ColorMap::TokyoNight,
+                        };
                         let new_nx = compute_sim_nx(term_width, term_height, model);
                         let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
                         let _ = reset_tx.send((model, new_sim));
@@ -735,7 +755,7 @@ fn run_headless() {
         }
 
         if let Some(s) = snap {
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -759,7 +779,7 @@ fn run_headless() {
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap);
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -811,7 +831,7 @@ mod tests {
         for _ in 0..3 {
             solver::fluid_step(&mut sim, &params);
             let snap = sim.snapshot();
-            let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field);
+            let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field, renderer::ColorMap::TokyoNight);
             assert_eq!(rgba.len(), cfg.frame_width * cfg.frame_height * 4);
         }
     }
@@ -826,7 +846,7 @@ mod tests {
         for _ in 0..3 {
             solver::fluid_step_karman(&mut sim, &params);
             let snap = sim.snapshot();
-            let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field);
+            let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field, renderer::ColorMap::TokyoNight);
             assert_eq!(rgba.len(), cfg.frame_width * cfg.frame_height * 4);
         }
     }
@@ -888,7 +908,7 @@ mod tests {
 
         solver::fluid_step_karman(&mut sim, &params);
         let snap = sim.snapshot();
-        let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field);
+        let rgba = renderer::render(&snap, &cfg, renderer::VizMode::Field, renderer::ColorMap::TokyoNight);
 
         let mut encoder = iterm2::Iterm2Encoder::new();
         let seq = encoder.encode(&rgba, cfg.frame_width, cfg.frame_height, 640, 320);

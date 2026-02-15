@@ -2,6 +2,7 @@ mod color;
 mod font;
 
 // Re-export public API
+pub use color::ColorMap;
 pub use font::render_status;
 pub(crate) use font::{draw_text, draw_text_sized, FONT_HEIGHT, FONT_WIDTH, STATUS_BAR_HEIGHT};
 
@@ -93,10 +94,12 @@ impl RenderConfig {
     }
 }
 
-/// Compute vorticity field from velocity and find max absolute value.
-fn compute_vorticity(vx: &[f64], vy: &[f64], nx: usize) -> (Vec<f64>, f64) {
+/// Compute vorticity field from velocity.
+/// Returns (field, positive_max, negative_max) where both max values are >= 0.
+fn compute_vorticity(vx: &[f64], vy: &[f64], nx: usize) -> (Vec<f64>, f64, f64) {
     let mut omega = vec![0.0; nx * N];
-    let mut max_abs = 0.0_f64;
+    let mut pos_max = 0.0_f64;
+    let mut neg_max = 0.0_f64;
     for j in 1..(N - 1) as i32 {
         for i in 1..(nx - 1) as i32 {
             // Central difference: dvy/dx - dvx/dy
@@ -104,10 +107,11 @@ fn compute_vorticity(vx: &[f64], vy: &[f64], nx: usize) -> (Vec<f64>, f64) {
             let dvxdy = (vx[idx(i, j + 1, nx)] - vx[idx(i, j - 1, nx)]) * 0.5;
             let w = dvydx - dvxdy;
             omega[idx(i, j, nx)] = w;
-            max_abs = max_abs.max(w.abs());
+            if w > 0.0 { pos_max = pos_max.max(w); }
+            else { neg_max = neg_max.max(-w); }
         }
     }
-    (omega, max_abs)
+    (omega, pos_max, neg_max)
 }
 
 /// Compute stream function psi from vx by integrating in y-direction.
@@ -178,7 +182,7 @@ fn screen_blend(buf: &mut [u8], off: usize, r: f64, g: f64, b: f64, alpha: f64) 
 
 /// Render field + color bar into a pre-allocated RGBA buffer.
 /// The buffer is resized and zeroed as needed.
-pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode) {
+pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap) {
     let dw = cfg.display_width;
     let dh = cfg.display_height;
     let frame_width = cfg.frame_width;
@@ -190,10 +194,10 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     buf.fill(0);
 
     // Precompute derived fields if needed
-    let (vort_field, vort_max) = if viz_mode == VizMode::Vorticity {
+    let (vort_field, vort_pos_max, vort_neg_max) = if viz_mode == VizMode::Vorticity {
         compute_vorticity(&snap.vx, &snap.vy, nx)
     } else {
-        (vec![], 0.0)
+        (vec![], 0.0, 0.0)
     };
     let (psi_field, psi_min, psi_max) = if viz_mode == VizMode::Streamline {
         compute_stream_function(&snap.vx, nx)
@@ -235,9 +239,17 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                           + w10 * fx * (1.0 - fy)
                           + w01 * (1.0 - fx) * fy
                           + w11 * fx * fy;
-                    let raw = if vort_max > 0.0 { (w.abs() / vort_max).min(1.0) } else { 0.0 };
-                    let s = 1.0 - raw.powf(0.25);
-                    [(s * 140.0) as u8, (s * 12.0) as u8, (s * 12.0) as u8, 255]
+                    // Signed diverging with independent normalization per sign:
+                    // blue (negative) ← dark (zero) → red (positive)
+                    if w >= 0.0 {
+                        let norm = if vort_pos_max > 0.0 { (w / vort_pos_max).min(1.0) } else { 0.0 };
+                        let i = norm.powf(0.4);
+                        [(i * 220.0) as u8, (i * 40.0) as u8, (i * 30.0) as u8, 255]
+                    } else {
+                        let norm = if vort_neg_max > 0.0 { (-w / vort_neg_max).min(1.0) } else { 0.0 };
+                        let i = norm.powf(0.4);
+                        [(i * 30.0) as u8, (i * 60.0) as u8, (i * 220.0) as u8, 255]
+                    }
                 }
                 VizMode::Streamline => {
                     // Bilinear interpolate psi
@@ -306,7 +318,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                         + t10 * fx * (1.0 - fy)
                         + t01 * (1.0 - fx) * fy
                         + t11 * fx * fy;
-                    color::temperature_to_rgba(t)
+                    color::map_to_rgba(t, colormap)
                 }
                 VizMode::None => [0, 0, 0, 255],
             };
@@ -348,8 +360,14 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
         let t = 1.0 - y as f64 / (dh - 1) as f64;
         let rgba = match viz_mode {
             VizMode::Vorticity => {
-                let s = t;
-                [(s * 140.0) as u8, (s * 12.0) as u8, (s * 12.0) as u8, 255]
+                // Diverging bar: blue (-1, bottom) → dark (0, middle) → red (+1, top)
+                let signed = t * 2.0 - 1.0;
+                let intensity = signed.abs().powf(0.4);
+                if signed >= 0.0 {
+                    [(intensity * 220.0) as u8, (intensity * 40.0) as u8, (intensity * 30.0) as u8, 255]
+                } else {
+                    [(intensity * 30.0) as u8, (intensity * 60.0) as u8, (intensity * 220.0) as u8, 255]
+                }
             }
             VizMode::Streamline => {
                 // Velocity magnitude gradient: dark navy -> bright teal
@@ -358,7 +376,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                 let b = (30.0 + t * 60.0) as u8;
                 [r, g, b, 255]
             }
-            VizMode::Field => color::temperature_to_rgba(t),
+            VizMode::Field => color::map_to_rgba(t, colormap),
             VizMode::None => [0, 0, 0, 255],
         };
         for bx in 0..BAR_WIDTH {
@@ -518,9 +536,9 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
 
 /// Render field + color bar to a new RGBA buffer (test convenience wrapper).
 #[cfg(any(test, debug_assertions))]
-pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode) -> Vec<u8> {
+pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap) -> Vec<u8> {
     let mut buf = Vec::new();
-    render_into(&mut buf, snap, cfg, viz_mode);
+    render_into(&mut buf, snap, cfg, viz_mode, colormap);
     buf
 }
 
@@ -556,7 +574,7 @@ mod tests {
     fn test_render_buffer_size() {
         let snap = SimState::new(400, 0.15, N).snapshot();
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
         assert_eq!(buf.len(), cfg.frame_width * cfg.frame_height * 4);
     }
 
@@ -564,7 +582,7 @@ mod tests {
     fn test_render_y_flip() {
         let snap = SimState::new(400, 0.15, N).snapshot();
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         // Sample top and bottom of display area
         let x = cfg.display_width / 2;
@@ -586,7 +604,7 @@ mod tests {
         snap.particles_y.push(mid);
 
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         let cx = (mid * cfg.scale_x()) as usize;
         let cy = (((N - 1) as f64 - mid) * cfg.scale_y()) as usize;
@@ -611,11 +629,11 @@ mod tests {
         let cfg = test_config();
 
         // Render with particle
-        let buf_with = render(&snap, &cfg, VizMode::Field);
+        let buf_with = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
         // Render without particle
         snap.particles_x.clear();
         snap.particles_y.clear();
-        let buf_without = render(&snap, &cfg, VizMode::Field);
+        let buf_without = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         let cx = (mid * cfg.scale_x()) as usize;
         let cy = (((N - 1) as f64 - mid) * cfg.scale_y()) as usize;
@@ -630,7 +648,7 @@ mod tests {
     fn test_color_bar_gradient() {
         let snap = SimState::new(400, 0.15, N).snapshot();
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         let bar_x = cfg.display_width + BAR_GAP + BAR_WIDTH / 2;
         let top_offset = bar_x * 4;
@@ -648,7 +666,7 @@ mod tests {
         snap.temperature.fill(0.5); // uniform temp
 
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         // Cylinder center in sim: (64, 64)
         let cx_screen = (64.0 * cfg.scale_x()) as usize;
@@ -664,7 +682,7 @@ mod tests {
         let snap = SimState::new(0, 0.15, N).snapshot();
         assert!(snap.cylinder.is_none());
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
         // Just check it doesn't crash and has correct size
         assert_eq!(buf.len(), cfg.frame_width * cfg.frame_height * 4);
     }
@@ -676,7 +694,7 @@ mod tests {
         let snap = SimState::new(0, 0.15, nx).snapshot();
         assert_eq!(snap.nx, nx);
         let cfg = RenderConfig::fit(800, 512, 1, nx);
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
         assert_eq!(buf.len(), cfg.frame_width * cfg.frame_height * 4);
     }
 
@@ -684,7 +702,7 @@ mod tests {
     fn test_color_bar_labels() {
         let snap = SimState::new(0, 0.15, N).snapshot();
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::Field);
+        let buf = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         // Check that the label area (right of ticks) has some non-zero pixels
         let label_x = cfg.display_width + BAR_GAP + BAR_WIDTH + TICK_LEN + LABEL_GAP;
@@ -719,13 +737,13 @@ mod tests {
         assert!(snap.trail_xs.len() >= 4, "Should have trail history");
 
         let cfg = test_config();
-        let buf_with_trail = render(&snap, &cfg, VizMode::Field);
+        let buf_with_trail = render(&snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         // Compare against render without trail
         let mut no_trail_snap = snap;
         no_trail_snap.trail_xs.clear();
         no_trail_snap.trail_ys.clear();
-        let buf_no_trail = render(&no_trail_snap, &cfg, VizMode::Field);
+        let buf_no_trail = render(&no_trail_snap, &cfg, VizMode::Field, ColorMap::TokyoNight);
 
         // The two buffers should differ (trail pixels changed some values)
         let diffs: usize = buf_with_trail.iter().zip(buf_no_trail.iter())
@@ -754,7 +772,7 @@ mod tests {
     fn test_viz_mode_none_renders_black_background() {
         let snap = SimState::new(400, 0.15, N).snapshot();
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::None);
+        let buf = render(&snap, &cfg, VizMode::None, ColorMap::TokyoNight);
         // Sample a pixel in the middle of the field area (not on a particle)
         // Background should be black [0, 0, 0, 255]
         // Check multiple pixels; at least most should be black
@@ -809,7 +827,7 @@ mod tests {
         // Give it some velocity for stream function
         for v in snap.vx.iter_mut() { *v = 0.5; }
         let cfg = RenderConfig::fit(800, 512, 1, nx);
-        let buf = render(&snap, &cfg, VizMode::Streamline);
+        let buf = render(&snap, &cfg, VizMode::Streamline, ColorMap::TokyoNight);
         assert_eq!(buf.len(), cfg.frame_width * cfg.frame_height * 4);
     }
 
@@ -831,7 +849,7 @@ mod tests {
         assert!(snap.trail_xs.len() >= 5, "Should have enough trail history");
 
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::None);
+        let buf = render(&snap, &cfg, VizMode::None, ColorMap::TokyoNight);
 
         let sx = cfg.scale_x();
         let sy = cfg.scale_y();
@@ -896,7 +914,7 @@ mod tests {
         let snap = state.snapshot();
 
         let cfg = test_config();
-        let buf = render(&snap, &cfg, VizMode::None);
+        let buf = render(&snap, &cfg, VizMode::None, ColorMap::TokyoNight);
 
         // Find the head position on screen
         let sx = cfg.scale_x();

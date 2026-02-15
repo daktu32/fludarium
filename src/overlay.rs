@@ -86,7 +86,7 @@ const PARAM_DEFS_KARMAN: [ParamDef; 5] = [
 const PARAM_DEFS_KH: [ParamDef; 7] = [
     param!("visc", "viscosity", "velocity viscosity coefficient",   visc,            0.0,    0.01,   0.0001, 0.00005, 0.001),
     param!("diff", "diffusion", "tracer diffusion rate",            diff,            0.0,    0.005,  0.0001, 0.00005, 0.0005),
-    param!("dt",   "timestep",  "simulation timestep",              dt,              0.005,  0.2,    0.005,  0.001,   0.1),
+    param!("dt",   "timestep",  "simulation timestep",              dt,              0.005,  0.2,    0.005,  0.001,   0.05),
     param!("shear","shear vel", "shear flow velocity magnitude",    shear_velocity,  0.01,   0.3,    0.005,  0.001,   0.08),
     param!("conf", "confine",   "vorticity confinement strength",   confinement,     0.0,    30.0,   0.5,    0.1,     0.0),
     param!("relax","relaxation","shear flow relaxation rate",       shear_relax,     0.0,    5.0,    0.1,    0.05,    1.0),
