@@ -2,6 +2,7 @@
 pub enum FluidModel {
     RayleighBenard,
     KarmanVortex,
+    KelvinHelmholtz,
 }
 
 impl Default for FluidModel {
@@ -322,6 +323,87 @@ impl SimState {
             particles_y,
             mask: Some(mask),
             cylinder: Some((cx, cy, radius)),
+            trail_xs: vec![Vec::new(); TRAIL_LEN],
+            trail_ys: vec![Vec::new(); TRAIL_LEN],
+            trail_cursor: 0,
+            trail_count: 0,
+        }
+    }
+
+    pub fn new_kh(num_particles: usize, params: &crate::solver::SolverParams, nx: usize) -> Self {
+        let size = nx * N;
+        let mut rng = Xor128::new(42);
+
+        let shear_vel = params.shear_velocity;
+        let delta = params.shear_thickness;
+
+        let center_y = (N / 2) as f64;
+
+        // Shear flow: vx = U * tanh((y - N/2) / delta)
+        let mut vx = vec![0.0; size];
+        let mut vy = vec![0.0; size];
+        let mut temperature = vec![0.0; size];
+
+        for j in 0..N {
+            let y_norm = (j as f64 - center_y) / delta;
+            let tanh_val = y_norm.tanh();
+            let dye = 0.5 + 0.5 * tanh_val; // 0 at bottom, 1 at top
+            for i in 0..nx {
+                let ii = idx(i as i32, j as i32, nx);
+                vx[ii] = shear_vel * tanh_val;
+                temperature[ii] = dye;
+            }
+        }
+
+        // Sinusoidal perturbation to trigger KH instability
+        let k1 = 2.0; // 2 wavelengths in domain
+        let k2 = 4.0; // higher mode for symmetry breaking
+        let amp = 0.05;
+        let phase2: f64 = rng.next_f64() * std::f64::consts::PI;
+        for j in 0..N {
+            let y_norm = (j as f64 - center_y) / delta;
+            let envelope = (-y_norm * y_norm / 2.0).exp();
+            for i in 0..nx {
+                let ii = idx(i as i32, j as i32, nx);
+                let x_frac = i as f64 / nx as f64;
+                vy[ii] = amp * (2.0 * std::f64::consts::PI * k1 * x_frac).sin() * envelope
+                    + (amp / 2.0) * (2.0 * std::f64::consts::PI * k2 * x_frac + phase2).sin() * envelope;
+            }
+        }
+
+        // Particles: 80% near interface, 20% random
+        let mut particles_x = Vec::with_capacity(num_particles);
+        let mut particles_y = Vec::with_capacity(num_particles);
+        let interface_count = num_particles * 4 / 5;
+        for _ in 0..interface_count {
+            let px = (rng.next_f64() + 1.0) * 0.5 * nx as f64;
+            let py = center_y + delta * 2.0 * rng.next_f64();
+            particles_x.push(px.clamp(1.0, nx as f64 - 2.0));
+            particles_y.push(py.clamp(2.0, (N - 3) as f64));
+        }
+        for _ in interface_count..num_particles {
+            let px = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (nx as f64 - 5.0);
+            let py = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
+            particles_x.push(px);
+            particles_y.push(py);
+        }
+
+        Self {
+            nx,
+            vx,
+            vy,
+            vx0: vec![0.0; size],
+            vy0: vec![0.0; size],
+            temperature,
+            scratch_a: vec![0.0; size],
+            scratch_b: vec![0.0; size],
+            vorticity: vec![0.0; size],
+            vorticity_abs: vec![0.0; size],
+            rng,
+            particles_x,
+            particles_y,
+            mask: None,
+            cylinder: None,
             trail_xs: vec![Vec::new(); TRAIL_LEN],
             trail_ys: vec![Vec::new(); TRAIL_LEN],
             trail_cursor: 0,
@@ -657,5 +739,50 @@ mod tests {
         }
         // After TRAIL_LEN+3 calls, trail_xs should have TRAIL_LEN entries
         assert_eq!(dst.trail_xs.len(), TRAIL_LEN);
+    }
+
+    #[test]
+    fn test_qa_new_kh_shear_profile() {
+        let params = crate::solver::SolverParams::default_kh();
+        let state = SimState::new_kh(10, &params, N);
+        let mid_x = (N / 2) as i32;
+        // Top half (y > N/2) should have positive vx
+        let top_vx = state.vx[idx(mid_x, (3 * N / 4) as i32, N)];
+        assert!(top_vx > 0.0, "Top half should have positive vx, got {}", top_vx);
+        // Bottom half (y < N/2) should have negative vx
+        let bot_vx = state.vx[idx(mid_x, (N / 4) as i32, N)];
+        assert!(bot_vx < 0.0, "Bottom half should have negative vx, got {}", bot_vx);
+    }
+
+    #[test]
+    fn test_qa_new_kh_dye_interface() {
+        let params = crate::solver::SolverParams::default_kh();
+        let state = SimState::new_kh(10, &params, N);
+        // Top rows should have temperature near 1
+        for x in 0..N {
+            let t = state.temperature[idx(x as i32, (N - 2) as i32, N)];
+            assert!(t > 0.8, "Top temperature should be near 1.0, got {} at x={}", t, x);
+        }
+        // Bottom rows should have temperature near 0
+        for x in 0..N {
+            let t = state.temperature[idx(x as i32, 1, N)];
+            assert!(t < 0.2, "Bottom temperature should be near 0.0, got {} at x={}", t, x);
+        }
+    }
+
+    #[test]
+    fn test_qa_new_kh_no_mask() {
+        let params = crate::solver::SolverParams::default_kh();
+        let state = SimState::new_kh(10, &params, N);
+        assert!(state.mask.is_none(), "KH model should have no mask");
+        assert!(state.cylinder.is_none(), "KH model should have no cylinder");
+    }
+
+    #[test]
+    fn test_qa_new_kh_perturbation() {
+        let params = crate::solver::SolverParams::default_kh();
+        let state = SimState::new_kh(10, &params, N);
+        let has_nonzero_vy = state.vy.iter().any(|&v| v.abs() > 1e-15);
+        assert!(has_nonzero_vy, "vy should have non-zero perturbation for KH instability");
     }
 }

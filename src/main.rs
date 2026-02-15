@@ -158,6 +158,10 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
                     params.visc, params.dt, params.inflow_vel, re, num_particles,
                 )
             }
+            state::FluidModel::KelvinHelmholtz => format!(
+                "kh | visc={:.4} dt={:.3} shear={:.3} conf={:.1} | p={} | space=params m=model",
+                params.visc, params.dt, params.shear_velocity, params.confinement, num_particles,
+            ),
         }
     }
 }

@@ -82,11 +82,23 @@ const PARAM_DEFS_KARMAN: [ParamDef; 5] = [
     param!("conf", "confine",   "vorticity confinement strength",    confinement, 0.0,    30.0, 0.5,    0.1,    3.0),
 ];
 
+/// Kelvin-Helmholtz adjustable parameters.
+const PARAM_DEFS_KH: [ParamDef; 7] = [
+    param!("visc", "viscosity", "velocity viscosity coefficient",   visc,            0.0,    0.01,   0.0001, 0.00005, 0.001),
+    param!("diff", "diffusion", "tracer diffusion rate",            diff,            0.0,    0.005,  0.0001, 0.00005, 0.0005),
+    param!("dt",   "timestep",  "simulation timestep",              dt,              0.005,  0.2,    0.005,  0.001,   0.1),
+    param!("shear","shear vel", "shear flow velocity magnitude",    shear_velocity,  0.01,   0.3,    0.005,  0.001,   0.08),
+    param!("conf", "confine",   "vorticity confinement strength",   confinement,     0.0,    30.0,   0.5,    0.1,     0.0),
+    param!("relax","relaxation","shear flow relaxation rate",       shear_relax,     0.0,    5.0,    0.1,    0.05,    1.0),
+    param!("thick","thickness", "shear layer half-width in cells",  shear_thickness, 1.0,    10.0,   0.5,    0.1,     3.0),
+];
+
 /// Get parameter definitions for the given fluid model.
 pub fn param_defs(model: FluidModel) -> &'static [ParamDef] {
     match model {
         FluidModel::RayleighBenard => &PARAM_DEFS_RB,
         FluidModel::KarmanVortex => &PARAM_DEFS_KARMAN,
+        FluidModel::KelvinHelmholtz => &PARAM_DEFS_KH,
     }
 }
 
@@ -254,6 +266,7 @@ pub fn render_overlay(
             let re = params.inflow_vel * (params.cylinder_radius * 2.0) / params.visc;
             format!("karman vortex  re={:.0}", re)
         }
+        FluidModel::KelvinHelmholtz => "kelvin helmholtz".to_string(),
     };
     renderer::draw_text_sized(buf, frame_width, left, cy, &header, colors::HEADER, cw, ch);
     cy += row_h + 4;
@@ -491,5 +504,33 @@ mod tests {
             "visc should be reset to default 0.008, got {}",
             params.visc
         );
+    }
+
+    #[test]
+    fn test_qa_param_defaults_match_solver_kh() {
+        let defaults = SolverParams::default_kh();
+        for def in param_defs(FluidModel::KelvinHelmholtz) {
+            let solver_val = (def.get)(&defaults);
+            assert!(
+                (solver_val - def.default).abs() < 1e-10,
+                "PARAM_DEFS_KH.default for {} ({}) doesn't match SolverParams::default_kh() ({})",
+                def.name,
+                def.default,
+                solver_val
+            );
+        }
+    }
+
+    #[test]
+    fn test_qa_navigate_wraps_kh() {
+        let mut state = OverlayState::new();
+        let model = FluidModel::KelvinHelmholtz;
+        let count = param_defs(model).len();
+        assert_eq!(count, 7, "KH should have 7 params");
+        assert_eq!(state.selected, 0);
+        state.navigate(-1, model);
+        assert_eq!(state.selected, count - 1, "Should wrap to last KH param");
+        state.navigate(1, model);
+        assert_eq!(state.selected, 0, "Should wrap back to first");
     }
 }

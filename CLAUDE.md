@@ -11,7 +11,7 @@ fludarium is a fluid dynamics visualizer supporting multiple simulation models: 
 ```bash
 cargo build              # Debug build
 cargo build --release    # Release build (recommended for running)
-cargo test               # Run all tests (~108 passing, 1 ignored)
+cargo test               # Run all tests (~152 passing, 1 ignored)
 cargo test solver        # Run only solver module tests
 cargo test state         # Run only state module tests
 cargo test renderer      # Run only renderer module tests
@@ -35,18 +35,19 @@ GUI mode:     keyboard input → FrameSnapshot → render() → overlay → rgba
 Headless mode:                  FrameSnapshot → render() → RGBA → PNG → base64 → iTerm2 escape → stdout
 ```
 
-### Dual Simulation Model
+### Triple Simulation Model
 
 The `FluidModel` enum (`state.rs`) selects between:
 - **RayleighBenard**: Thermal convection with periodic X boundaries, hot bottom (Gaussian heat source), cold top. Grid is N×N, rendered with configurable tile count for horizontal repetition.
 - **KarmanVortex**: Uniform inflow from left past a cylinder obstacle, outflow right. Grid is NX×N where NX scales with window aspect ratio. Supports dye and vorticity visualization, particle trails, and vorticity confinement.
+- **KelvinHelmholtz**: Shear-driven interface instability with periodic X boundaries and free-slip Y walls. Grid is N×N. Tanh shear profile with sinusoidal perturbation, passive dye tracer, weak shear relaxation to counteract numerical diffusion.
 
-Each model has its own `fluid_step` / `fluid_step_karman`, `set_bnd_rb` / `set_bnd_karman`, `SimState::new` / `SimState::new_karman`, and `SolverParams::default` / `SolverParams::default_karman`. The user can switch models at runtime with the M key; parameters are preserved per-model.
+Each model has its own `fluid_step` / `fluid_step_karman` / `fluid_step_kh`, `set_bnd_rb` / `set_bnd_karman` / `set_bnd_kh`, `SimState::new` / `SimState::new_karman` / `SimState::new_kh`, and `SolverParams::default` / `default_karman` / `default_kh`. The user can cycle models at runtime with the M key (RB → Kármán → KH → RB); parameters are preserved per-model.
 
 ### Module Responsibilities
 
 - **`state.rs`** — `FluidModel` enum, `SimState` struct (velocity fields `vx/vy/vx0/vy0`, `temperature`, scratch buffers, `Xor128` PRNG, particles, optional cylinder `mask`/`cylinder` geometry, particle trail ring buffer). Grid height is always `N`, width is `nx` (= N for RB, aspect-scaled for Karman). `idx(x, y, nx)` handles 2D→1D with mod wrapping. `FrameSnapshot` decouples simulation from rendering (includes temperature, velocity, particles, trails, cylinder info).
-- **`solver.rs`** — Jos Stam "Stable Fluids" CFD. `BoundaryConfig` enum dispatches boundary conditions per model. Core functions: `diffuse`, `advect` (Semi-Lagrangian), `project` (pressure projection). `SolverParams` holds all tuning constants with `default()` (RB) and `default_karman()`. Karman-specific: `apply_cylinder_mask`, `vorticity_confinement`, `inject_dye_at_inflow`.
+- **`solver/`** — Jos Stam "Stable Fluids" CFD (8 files). `BoundaryConfig` enum dispatches boundary conditions per model. Core functions: `diffuse`, `advect` (Semi-Lagrangian), `project` (pressure projection). `SolverParams` holds all tuning constants with `default()` (RB), `default_karman()`, and `default_kh()`. Karman-specific: `apply_cylinder_mask`, `vorticity_confinement`, `inject_dye_at_inflow`. KH-specific (`kh.rs`): `reinject_shear`, `inject_dye_kh`.
 - **`overlay.rs`** — btop-style semi-transparent parameter panel. `OverlayState` (visible, selected), `ParamDef` with get/set function pointers. Model-specific param sets (`PARAM_DEFS_RB` with 7 params, `PARAM_DEFS_KARMAN` with 5 params). Teal gradient gauge bars, keyboard controls.
 - **`renderer.rs`** — Maps fields to RGBA via 5-stop Tokyo Night colormap (navy→blue→purple→pink→orange). `RenderConfig::fit(w, h, tiles, sim_nx)` computes layout. RB: tiled horizontally with color bar. Karman: stretched to window, smooth cylinder rendering, optional vorticity field, particle trails. 5×7 bitmap font system with `draw_text` (1×) and `draw_text_sized` (scaled) for overlay/status bar.
 - **`iterm2.rs`** — `Iterm2Encoder` for headless terminal rendering. RGBA → RGB → PNG (fast compression) → base64 → iTerm2 `\x1b]1337;File=...` escape sequence. Reusable buffers for zero per-frame allocation.

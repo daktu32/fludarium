@@ -19,6 +19,9 @@ pub struct SolverParams {
     pub cylinder_y: f64,
     pub cylinder_radius: f64,
     pub confinement: f64,
+    pub shear_velocity: f64,
+    pub shear_relax: f64,
+    pub shear_thickness: f64,
 }
 
 impl Default for SolverParams {
@@ -39,6 +42,9 @@ impl Default for SolverParams {
             cylinder_y: (N / 2) as f64,
             cylinder_radius: 8.0,
             confinement: 0.0,
+            shear_velocity: 0.0,
+            shear_relax: 0.0,
+            shear_thickness: 3.0,
         }
     }
 }
@@ -62,6 +68,33 @@ impl SolverParams {
             cylinder_y: (N / 2) as f64,
             cylinder_radius: 8.0,
             confinement: 3.0,
+            shear_velocity: 0.0,
+            shear_relax: 0.0,
+            shear_thickness: 3.0,
+        }
+    }
+
+    /// Default parameters for Kelvin-Helmholtz instability.
+    pub fn default_kh() -> Self {
+        Self {
+            visc: 0.001,
+            diff: 0.0005,
+            dt: 0.1,
+            diffuse_iter: 20,
+            project_iter: 30,
+            heat_buoyancy: 0.0,
+            noise_amp: 0.0,
+            source_strength: 0.0,
+            cool_rate: 0.0,
+            bottom_base: 0.0,
+            inflow_vel: 0.0,
+            cylinder_x: 0.0,
+            cylinder_y: 0.0,
+            cylinder_radius: 0.0,
+            confinement: 0.0,
+            shear_velocity: 0.08,
+            shear_relax: 1.0,
+            shear_thickness: 3.0,
         }
     }
 }

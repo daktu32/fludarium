@@ -1,8 +1,8 @@
 # fludarium Progress
 
-## Current Status: Modularized Dual-Model Fluid Simulator
+## Current Status: Modularized Triple-Model Fluid Simulator
 
-140 tests passing. Codebase modularized into directory-based modules: `solver/` (7 files), `renderer/` (3 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Dual simulation models (Rayleigh-Benard convection + Kármán vortex street). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. No external config files — all defaults in code.
+152 tests passing. Codebase modularized into directory-based modules: `solver/` (8 files), `renderer/` (3 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Triple simulation models (Rayleigh-Benard convection + Kármán vortex street + Kelvin-Helmholtz instability). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. No external config files — all defaults in code.
 
 ## Completed
 
@@ -180,10 +180,28 @@
 - Public API preserved — no changes needed in consuming code
 - Multi-agent parallel refactoring (3 rust-architect agents working simultaneously)
 
+### Sub-issue 12: Kelvin-Helmholtz Instability Model
+- **`FluidModel::KelvinHelmholtz`** — third simulation model: shear-driven interface instability
+- **Physics**: tanh shear profile (`vx = U·tanh((y-N/2)/δ)`), sinusoidal vy perturbation (k=2,4), passive dye tracer
+- **Boundary conditions**: X-periodic + Y free-slip (Neumann for vx, reflection for vy)
+- **`solver/kh.rs` (new)**: `reinject_shear()` (wall-only relaxation toward target shear profile, 6 rows from each wall with fade)
+- **`fluid_step_kh()`**: reinject shear → diffuse → project → advect → project → vorticity confinement → diffuse/advect dye → clamp → advect particles
+- **Vorticity confinement**: reuses Kármán's `vorticity_confinement()` to counteract Semi-Lagrangian numerical diffusion — essential for cat's-eye vortex formation
+- **Discovery-oriented defaults**: `confinement=0.0`, `shear_velocity=0.08` — conservative start, user tunes params to reveal dramatic KH vortex structures
+- **`SolverParams::default_kh()`**: visc=0.001, diff=0.0005, dt=0.1, shear_velocity=0.08, confinement=0.0, shear_relax=1.0, shear_thickness=3.0
+- **3 new SolverParams fields**: `shear_velocity`, `shear_relax`, `shear_thickness`
+- **Overlay**: 7 adjustable parameters (visc, diff, dt, shear vel, confinement, relaxation, thickness)
+- **3-model cycle**: M key cycles RB → Kármán → KH → RB (save/restore per-model params)
+- **Renderer**: no changes needed (cylinder=None, tiles=1, existing colormap works for dye tracer)
+- **No per-frame dye injection**: periodic boundaries mean initial dye field advects freely, enabling natural vortex roll-up visualization
+- **9 QA tests + 3 unit tests**: initial conditions, shear profile, boundary conditions, dye interface, perturbation, fluid step stability, param consistency
+- Multi-agent team development: physics-theorist (model design) + rust-architect (code architecture) + qa-agent (quality assurance)
+
 ## Test Summary
-- **140 tests, all passing** (1 ignored: diagnostic)
+- **152 tests, all passing** (1 ignored: diagnostic)
 - Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test
 - ModelParams save_and_switch test + 2 interpolate_velocity precision tests
+- 3 KH unit tests + 9 KH QA tests (initial conditions, shear maintenance, param defaults)
 - `cargo test` succeeds with 0 failures
 
 ### Distribution Setup

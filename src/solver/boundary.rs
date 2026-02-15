@@ -14,12 +14,13 @@ pub enum FieldType {
 pub enum BoundaryConfig {
     RayleighBenard { bottom_base: f64 },
     KarmanVortex { inflow_vel: f64 },
+    KelvinHelmholtz,
 }
 
 impl BoundaryConfig {
     /// Whether the X-axis uses periodic (wrapping) boundaries.
     pub fn periodic_x(&self) -> bool {
-        matches!(self, BoundaryConfig::RayleighBenard { .. })
+        matches!(self, BoundaryConfig::RayleighBenard { .. } | BoundaryConfig::KelvinHelmholtz)
     }
 
     /// X iteration range for interior loops.
@@ -42,6 +43,9 @@ pub fn set_bnd(field_type: FieldType, x: &mut [f64], bc: &BoundaryConfig, nx: us
         }
         BoundaryConfig::KarmanVortex { inflow_vel } => {
             set_bnd_karman(field_type, x, *inflow_vel, nx);
+        }
+        BoundaryConfig::KelvinHelmholtz => {
+            set_bnd_kh(field_type, x, nx);
         }
     }
 }
@@ -118,6 +122,27 @@ fn set_bnd_karman(field_type: FieldType, x: &mut [f64], inflow_vel: f64, nx: usi
                 // Scalar/dye: Neumann at left, zero-gradient at right
                 x[idx(0, j as i32, nx)] = x[idx(1, j as i32, nx)];
                 x[idx((nx - 1) as i32, j as i32, nx)] = x[idx((nx - 2) as i32, j as i32, nx)];
+            }
+        }
+    }
+}
+
+/// Kelvin-Helmholtz boundary conditions.
+/// X: periodic (wraps via idx). Y: free-slip walls.
+/// vx: Neumann (dvx/dy=0). vy: reflection (no-penetration).
+/// Scalar/temperature: Neumann (zero gradient).
+fn set_bnd_kh(field_type: FieldType, x: &mut [f64], nx: usize) {
+    for i in 0..nx {
+        match field_type {
+            FieldType::Vy => {
+                // Free-slip: no-penetration at walls
+                x[idx(i as i32, 0, nx)] = -x[idx(i as i32, 1, nx)];
+                x[idx(i as i32, (N - 1) as i32, nx)] = -x[idx(i as i32, (N - 2) as i32, nx)];
+            }
+            _ => {
+                // Free-slip: Neumann for vx, scalar, temperature
+                x[idx(i as i32, 0, nx)] = x[idx(i as i32, 1, nx)];
+                x[idx(i as i32, (N - 1) as i32, nx)] = x[idx(i as i32, (N - 2) as i32, nx)];
             }
         }
     }

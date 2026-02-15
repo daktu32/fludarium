@@ -35,6 +35,7 @@ pub fn create_sim_state(
             params.cylinder_radius,
             nx,
         ),
+        FluidModel::KelvinHelmholtz => SimState::new_kh(num_particles, params, nx),
         _ => SimState::new(num_particles, params.bottom_base, nx),
     }
 }
@@ -43,6 +44,7 @@ pub fn create_sim_state(
 pub struct ModelParams {
     pub rb: SolverParams,
     pub karman: SolverParams,
+    pub kh: SolverParams,
 }
 
 impl ModelParams {
@@ -50,17 +52,19 @@ impl ModelParams {
         Self {
             rb: SolverParams::default(),
             karman: SolverParams::default_karman(),
+            kh: SolverParams::default_kh(),
         }
     }
 
     pub fn get(&self, model: FluidModel) -> &SolverParams {
         match model {
             FluidModel::KarmanVortex => &self.karman,
+            FluidModel::KelvinHelmholtz => &self.kh,
             _ => &self.rb,
         }
     }
 
-    /// Save current params for old_model, toggle to new model, return (new_model, restored_params).
+    /// Save current params for old_model, cycle to next model, return (new_model, restored_params).
     pub fn save_and_switch(
         &mut self,
         current: &SolverParams,
@@ -69,10 +73,13 @@ impl ModelParams {
         match old_model {
             FluidModel::RayleighBenard => self.rb = current.clone(),
             FluidModel::KarmanVortex => self.karman = current.clone(),
+            FluidModel::KelvinHelmholtz => self.kh = current.clone(),
         }
+        // Cycle: RB -> Karman -> KH -> RB
         let new_model = match old_model {
             FluidModel::RayleighBenard => FluidModel::KarmanVortex,
-            FluidModel::KarmanVortex => FluidModel::RayleighBenard,
+            FluidModel::KarmanVortex => FluidModel::KelvinHelmholtz,
+            FluidModel::KelvinHelmholtz => FluidModel::RayleighBenard,
         };
         let restored = self.get(new_model).clone();
         (new_model, restored)
@@ -119,6 +126,7 @@ pub fn spawn_physics_thread(
             for _ in 0..steps_per_frame {
                 match cur_model {
                     FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
+                    FluidModel::KelvinHelmholtz => solver::fluid_step_kh(&mut sim, &params),
                     _ => solver::fluid_step(&mut sim, &params),
                 }
             }
@@ -154,17 +162,20 @@ mod tests {
         let mut current = mp.get(FluidModel::KarmanVortex).clone();
         // Modify a Karman param
         current.visc = 0.999;
-        // Switch from Karman -> RB
+        // Switch from Karman -> KH (3-model cycle: RB -> Karman -> KH -> RB)
         let (new_model, restored) = mp.save_and_switch(&current, FluidModel::KarmanVortex);
-        assert!(matches!(new_model, FluidModel::RayleighBenard));
-        // Restored should be RB defaults
-        assert!((restored.visc - SolverParams::default().visc).abs() < 1e-10);
+        assert!(matches!(new_model, FluidModel::KelvinHelmholtz));
+        // Restored should be KH defaults
+        assert!((restored.visc - SolverParams::default_kh().visc).abs() < 1e-10);
         // Saved Karman params should have our modification
         assert!((mp.karman.visc - 0.999).abs() < 1e-10);
-        // Switch back from RB -> Karman
-        let (back_model, back_params) = mp.save_and_switch(&restored, new_model);
+        // Switch from KH -> RB
+        let (rb_model, rb_params) = mp.save_and_switch(&restored, new_model);
+        assert!(matches!(rb_model, FluidModel::RayleighBenard));
+        assert!((rb_params.visc - SolverParams::default().visc).abs() < 1e-10);
+        // Switch from RB -> Karman, should get our modified Karman visc back
+        let (back_model, back_params) = mp.save_and_switch(&rb_params, rb_model);
         assert!(matches!(back_model, FluidModel::KarmanVortex));
-        // Should get our modified Karman visc back
         assert!((back_params.visc - 0.999).abs() < 1e-10);
     }
 
@@ -186,5 +197,11 @@ mod tests {
         // Very tall window: aspect < 1
         let nx = compute_sim_nx(200, 800, FluidModel::KarmanVortex);
         assert_eq!(nx, N, "Karman NX should not go below N");
+    }
+
+    #[test]
+    fn test_qa_compute_sim_nx_kh() {
+        let nx = compute_sim_nx(800, 600, FluidModel::KelvinHelmholtz);
+        assert_eq!(nx, N, "KH model should use N for nx");
     }
 }

@@ -1,6 +1,7 @@
 mod boundary;
 mod core;
 mod karman;
+mod kh;
 mod params;
 mod particle;
 mod thermal;
@@ -11,9 +12,10 @@ pub use params::SolverParams;
 pub use thermal::inject_thermal_perturbation;
 
 use crate::state::N;
-use boundary::BoundaryConfig::{KarmanVortex, RayleighBenard};
+use boundary::BoundaryConfig::{KarmanVortex, KelvinHelmholtz, RayleighBenard};
 use core::{advect, diffuse, project};
 use karman::{apply_mask, apply_mask_fields, damp_dye_in_cylinder, inject_dye, inject_inflow, inject_wake_perturbation, vorticity_confinement};
+use kh::reinject_shear;
 use particle::{advect_particles, advect_particles_karman};
 use thermal::{apply_buoyancy, inject_heat_source};
 
@@ -158,6 +160,47 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
 
     // 13. Advect particles
     advect_particles_karman(state, dt);
+}
+
+/// Full fluid simulation step for Kelvin-Helmholtz instability.
+pub fn fluid_step_kh(state: &mut crate::state::SimState, params: &SolverParams) {
+    let dt = params.dt;
+    let nx = state.nx;
+    let bc = KelvinHelmholtz;
+
+    // 1. Reinject shear profile (counteract numerical diffusion)
+    reinject_shear(state, params);
+
+    // 2. Diffuse velocity
+    diffuse(FieldType::Vx, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vy, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter, &bc, nx);
+
+    // 3. Project (divergence-free)
+    project(&mut state.vx0, &mut state.vy0, &mut state.scratch_a, &mut state.scratch_b, params.project_iter, &bc, nx);
+
+    // 4. Advect velocity
+    advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
+
+    // 5. Project (divergence-free)
+    project(&mut state.vx, &mut state.vy, &mut state.scratch_a, &mut state.scratch_b, params.project_iter, &bc, nx);
+
+    // 5.5. Vorticity confinement -- counteract numerical diffusion
+    if params.confinement > 0.0 {
+        vorticity_confinement(state, params.confinement, dt);
+    }
+
+    // 6. Diffuse + advect dye (temperature as passive tracer)
+    diffuse(FieldType::Scalar, &mut state.scratch_a, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
+    advect(FieldType::Scalar, &mut state.temperature, &state.scratch_a, &state.vx, &state.vy, dt, &bc, nx);
+
+    // 7. Clamp dye
+    for t in state.temperature.iter_mut() {
+        *t = t.clamp(0.0, 1.0);
+    }
+
+    // 9. Advect particles (periodic X, reflected Y -- same as RB)
+    advect_particles(state, dt);
 }
 
 #[cfg(test)]
@@ -425,5 +468,34 @@ mod tests {
         let avg = temps.iter().sum::<f64>() / N as f64;
         let variance = temps.iter().map(|t| (t - avg).powi(2)).sum::<f64>() / N as f64;
         assert!(variance > 1e-6, "Convection should persist without noise: variance={}", variance);
+    }
+
+    #[test]
+    fn test_qa_fluid_step_kh_no_panic() {
+        let params = SolverParams::default_kh();
+        let mut state = SimState::new_kh(100, &params, N);
+        for _ in 0..10 {
+            fluid_step_kh(&mut state, &params);
+        }
+        // If we reach here, no panic occurred
+    }
+
+    #[test]
+    fn test_qa_kh_shear_maintained() {
+        let params = SolverParams::default_kh();
+        let mut state = SimState::new_kh(100, &params, N);
+        for _ in 0..100 {
+            fluid_step_kh(&mut state, &params);
+        }
+        // Average vx in top quarter should be positive
+        let top_avg: f64 = (0..N)
+            .map(|x| state.vx[idx(x as i32, (3 * N / 4) as i32, N)])
+            .sum::<f64>() / N as f64;
+        assert!(top_avg > 0.0, "Top quarter average vx should be positive after 100 steps, got {}", top_avg);
+        // Average vx in bottom quarter should be negative
+        let bot_avg: f64 = (0..N)
+            .map(|x| state.vx[idx(x as i32, (N / 4) as i32, N)])
+            .sum::<f64>() / N as f64;
+        assert!(bot_avg < 0.0, "Bottom quarter average vx should be negative after 100 steps, got {}", bot_avg);
     }
 }
