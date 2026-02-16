@@ -241,6 +241,12 @@
 - **Frame skipping**: `try_send` with `TrySendError::Full` recovery provides natural backpressure — encoder-busy frames are dropped, buffer recovered immediately.
 - 2 new PNG helper tests (CRC-32 + Adler-32 known values), 1 new roundtrip decode test via `png` crate.
 
+### Lid-Driven Cavity: Aspect Ratio & Particle Fix
+- **Pillarboxing**: `RenderConfig::fit_square()` preserves aspect ratio for square bounded domains (Cavity). Black bars on left/right sides center the simulation area within the window.
+- **`display_x_offset` field**: All rendering paths (field, color bar, trails, particle heads, status bar, overlay panel) offset by `x_off` for correct pillarbox alignment.
+- **`advect_particles_cavity()`**: X-axis ping-pong reflection (matching Y) replaces periodic wrap. Particles now circulate with the cavity flow instead of piling up on the right edge.
+- **`make_render_cfg()` helper**: Dispatches `fit_square()` for Cavity, `fit()` for others — used in all 6 RenderConfig creation sites (GUI init, model switch, resize; headless init, model switch, resize).
+
 ## Test Summary
 - **181 tests, all passing** (1 ignored: diagnostic)
 - Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test

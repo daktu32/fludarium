@@ -18,7 +18,7 @@ use cavity::compute_velocity_dye;
 use core::{advect, diffuse, project};
 use karman::{apply_mask, apply_mask_fields, damp_dye_in_cylinder, inject_dye, inject_inflow, inject_wake_perturbation, vorticity_confinement};
 use kh::reinject_shear;
-use particle::{advect_particles, advect_particles_karman};
+use particle::{advect_particles, advect_particles_cavity, advect_particles_karman};
 use thermal::{apply_buoyancy, inject_heat_source};
 
 /// Full fluid simulation step (Rayleigh-Benard).
@@ -228,8 +228,8 @@ pub fn fluid_step_cavity(state: &mut crate::state::SimState, params: &SolverPara
     // 5. Compute velocity magnitude as visualization dye
     compute_velocity_dye(state);
 
-    // 6. Advect particles (periodic X, reflected Y)
-    advect_particles(state, dt);
+    // 6. Advect particles (reflected X and Y -- solid walls on all sides)
+    advect_particles_cavity(state, dt);
 }
 
 #[cfg(test)]

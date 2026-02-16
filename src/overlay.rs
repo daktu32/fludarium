@@ -218,6 +218,7 @@ pub fn render_overlay(
     frame_width: usize,
     display_width: usize,
     display_height: usize,
+    display_x_offset: usize,
     state: &OverlayState,
     params: &SolverParams,
     model: FluidModel,
@@ -253,10 +254,10 @@ pub fn render_overlay(
         + (FONT_HEIGHT + 2)             // hints at 1x
         + pad;
 
-    // Center the panel (clamp to display area)
+    // Center the panel within display area (clamp to display area)
     let panel_w = panel_w.min(display_width.saturating_sub(4));
     let panel_h = panel_h.min(display_height.saturating_sub(4));
-    let px = display_width.saturating_sub(panel_w) / 2;
+    let px = display_x_offset + display_width.saturating_sub(panel_w) / 2;
     let py = display_height.saturating_sub(panel_h).saturating_sub(8);
 
     // Darken background
@@ -484,7 +485,7 @@ mod tests {
         let state = OverlayState::new(); // visible = false
         let params = SolverParams::default();
 
-        render_overlay(&mut buf, cfg.frame_width, cfg.display_width, cfg.display_height, &state, &params, FluidModel::RayleighBenard);
+        render_overlay(&mut buf, cfg.frame_width, cfg.display_width, cfg.display_height, cfg.display_x_offset, &state, &params, FluidModel::RayleighBenard);
 
         assert_eq!(buf, orig, "Invisible overlay should not modify buffer");
     }

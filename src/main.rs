@@ -189,6 +189,15 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
     }
 }
 
+/// Build the appropriate RenderConfig for the current model.
+/// Cavity uses aspect-preserving fit_square; others use stretch-to-fit.
+fn make_render_cfg(w: usize, h: usize, tiles: usize, sim_nx: usize, model: state::FluidModel) -> renderer::RenderConfig {
+    match model {
+        state::FluidModel::LidDrivenCavity => renderer::RenderConfig::fit_square(w, h, tiles, sim_nx),
+        _ => renderer::RenderConfig::fit(w, h, tiles, sim_nx),
+    }
+}
+
 fn is_headless() -> bool {
     std::env::args().any(|a| a == "--headless")
 }
@@ -361,7 +370,7 @@ fn run_gui() {
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
     let sim_nx = compute_sim_nx(win_width, win_height, model);
-    let mut render_cfg = renderer::RenderConfig::fit(win_width, win_height, tiles, sim_nx);
+    let mut render_cfg = make_render_cfg(win_width, win_height, tiles, sim_nx, model);
     let mut w = render_cfg.frame_width;
     let mut h = render_cfg.frame_height;
 
@@ -500,7 +509,7 @@ fn run_gui() {
             let _ = param_tx.send(current_params.clone());
             overlay_state.selected = 0;
             // Recompute layout for new tile count and NX
-            render_cfg = renderer::RenderConfig::fit(cur_w, cur_h, tiles, new_nx);
+            render_cfg = make_render_cfg(cur_w, cur_h, tiles, new_nx, model);
             w = render_cfg.frame_width;
             h = render_cfg.frame_height;
             framebuf = vec![0u32; w * h];
@@ -526,7 +535,7 @@ fn run_gui() {
                 let _ = reset_tx.send((model, new_sim));
                 last_snap = None;
             }
-            render_cfg = renderer::RenderConfig::fit(new_w, new_h, tiles, new_nx);
+            render_cfg = make_render_cfg(new_w, new_h, tiles, new_nx, model);
             w = render_cfg.frame_width;
             h = render_cfg.frame_height;
             framebuf = vec![0u32; w * h];
@@ -552,6 +561,7 @@ fn run_gui() {
                 render_cfg.frame_width,
                 render_cfg.display_width,
                 render_cfg.display_height,
+                render_cfg.display_x_offset,
                 &overlay_state,
                 &current_params,
                 model,
@@ -572,6 +582,7 @@ fn run_gui() {
                     render_cfg.frame_width,
                     render_cfg.display_width,
                     render_cfg.display_height,
+                    render_cfg.display_x_offset,
                     &overlay_state,
                     &current_params,
                     model,
@@ -692,7 +703,7 @@ fn run_headless() {
 
     // sim_nx based on terminal aspect ratio (not reduced render dims)
     let sim_nx = compute_sim_nx(term_width, term_height, model);
-    let mut render_cfg = renderer::RenderConfig::fit(render_w, render_h, tiles, sim_nx);
+    let mut render_cfg = make_render_cfg(render_w, render_h, tiles, sim_nx, model);
     if render_scale < 1.0 {
         render_cfg.particle_radius = 0; // single-pixel dots at reduced resolution
     }
@@ -850,7 +861,7 @@ fn run_headless() {
                         let _ = reset_tx.send((model, new_sim));
                         let _ = param_tx.send(current_params.clone());
                         overlay_state.selected = 0;
-                        render_cfg = renderer::RenderConfig::fit(render_w, render_h, tiles, new_nx);
+                        render_cfg = make_render_cfg(render_w, render_h, tiles, new_nx, model);
                         if render_scale < 1.0 {
                             render_cfg.particle_radius = 0;
                         }
@@ -887,7 +898,7 @@ fn run_headless() {
                 render_h = rh;
                 render_scale = rs;
                 // Stretch to fit (keep sim_nx, like GUI mode)
-                render_cfg = renderer::RenderConfig::fit(render_w, render_h, tiles, render_cfg.sim_nx);
+                render_cfg = make_render_cfg(render_w, render_h, tiles, render_cfg.sim_nx, model);
                 if render_scale < 1.0 {
                     render_cfg.particle_radius = 0;
                 }
@@ -918,6 +929,7 @@ fn run_headless() {
                 render_cfg.frame_width,
                 render_cfg.display_width,
                 render_cfg.display_height,
+                render_cfg.display_x_offset,
                 &overlay_state,
                 &current_params,
                 model,
@@ -955,6 +967,7 @@ fn run_headless() {
                     render_cfg.frame_width,
                     render_cfg.display_width,
                     render_cfg.display_height,
+                    render_cfg.display_x_offset,
                     &overlay_state,
                     &current_params,
                     model,

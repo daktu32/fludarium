@@ -153,7 +153,7 @@ pub fn render_status(buf: &mut [u8], cfg: &RenderConfig, text: &str) {
     let text_y = y_start + STATUS_PAD_TOP;
     let text_color: [u8; 3] = [0x88, 0x88, 0x88];
     let char_step = FONT_WIDTH + 1;
-    let mut cx = 4; // left padding
+    let mut cx = 4 + cfg.display_x_offset; // left padding, aligned with display area
     for &ch in text.as_bytes() {
         if cx + FONT_WIDTH > fw {
             break;

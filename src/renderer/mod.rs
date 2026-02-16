@@ -55,6 +55,8 @@ pub struct RenderConfig {
     pub sim_nx: usize,
     /// Particle dot radius: 0 = single pixel, 1 = 3x3 diamond (default).
     pub particle_radius: u8,
+    /// Horizontal pixel offset for centering (pillarboxing). 0 for stretch-to-fit.
+    pub display_x_offset: usize,
 }
 
 impl RenderConfig {
@@ -74,6 +76,30 @@ impl RenderConfig {
             tiles,
             sim_nx,
             particle_radius: 1,
+            display_x_offset: 0,
+        }
+    }
+
+    /// Compute layout for a square bounded domain (e.g. Lid-Driven Cavity).
+    /// Preserves aspect ratio with pillarboxing (black bars on sides).
+    pub fn fit_square(pixel_width: usize, pixel_height: usize, tiles: usize, sim_nx: usize) -> Self {
+        let available_width = pixel_width.saturating_sub(BAR_TOTAL).max(sim_nx);
+        let display_height = pixel_height.max(N);
+
+        // Aspect-ratio-preserving: display_width / display_height = (tiles * sim_nx) / N
+        let max_width = display_height * tiles * sim_nx / N;
+        let display_width = available_width.min(max_width);
+        let display_x_offset = (available_width - display_width) / 2;
+
+        Self {
+            display_width,
+            display_height,
+            frame_width: available_width + BAR_TOTAL,
+            frame_height: display_height + STATUS_BAR_HEIGHT,
+            tiles,
+            sim_nx,
+            particle_radius: 1,
+            display_x_offset,
         }
     }
 
@@ -187,6 +213,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     let dh = cfg.display_height;
     let frame_width = cfg.frame_width;
     let frame_height = cfg.frame_height;
+    let x_off = cfg.display_x_offset;
     let nx = snap.nx;
 
     let total = frame_width * frame_height * 4;
@@ -212,7 +239,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     let sim_total_x = tiles as f64 * nx as f64;
     for screen_y in 0..dh {
         for screen_x in 0..dw {
-            let offset = (screen_y * frame_width + screen_x) * 4;
+            let offset = (screen_y * frame_width + screen_x + x_off) * 4;
 
             // Map screen pixel to simulation coordinates
             let sim_y_raw = screen_y as f64 / dh as f64 * N as f64;
@@ -355,7 +382,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     }
 
     // Draw color bar (1.0 at top, 0.0 at bottom -- matching tick labels)
-    let bar_x = dw + BAR_GAP;
+    let bar_x = x_off + dw + BAR_GAP;
     for y in 0..dh {
         let t = 1.0 - y as f64 / (dh - 1) as f64;
         let rgba = match viz_mode {
@@ -467,7 +494,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                         let px = cx as usize;
                         let py = cy as usize;
                         if px < dw && py < dh {
-                            let off = (py * frame_width + px) * 4;
+                            let off = (py * frame_width + px + x_off) * 4;
                             let a = alpha * sparkle_mult;
                             blend(buf, off, color[0], color[1], color[2], a);
                         }
@@ -481,7 +508,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                             let px = (cx + dx) as usize;
                             let py = (cy + dy) as usize;
                             if px < dw && py < dh {
-                                let off = (py * frame_width + px) * 4;
+                                let off = (py * frame_width + px + x_off) * 4;
                                 let a = alpha * weight * sparkle_mult;
                                 blend(buf, off, color[0], color[1], color[2], a);
                             }
@@ -516,7 +543,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                 let px = cx as usize;
                 let py = cy as usize;
                 if px < dw && py < dh {
-                    let off = (py * frame_width + px) * 4;
+                    let off = (py * frame_width + px + x_off) * 4;
                     blend(buf, off, head_color[0], head_color[1], head_color[2], 1.0);
                 }
             } else {
@@ -524,7 +551,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
                     let px = (cx + dx) as usize;
                     let py = (cy + dy) as usize;
                     if px < dw && py < dh {
-                        let off = (py * frame_width + px) * 4;
+                        let off = (py * frame_width + px + x_off) * 4;
                         blend(buf, off, head_color[0], head_color[1], head_color[2], weight);
                     }
                 }

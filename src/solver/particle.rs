@@ -71,6 +71,67 @@ pub(super) fn advect_particles(state: &mut crate::state::SimState, dt: f64) {
     }
 }
 
+/// Advect particles for Lid-Driven Cavity.
+/// Both X and Y use ping-pong reflection (solid walls on all sides).
+pub(super) fn advect_particles_cavity(state: &mut crate::state::SimState, dt: f64) {
+    let nx = state.nx;
+    let dt0 = dt * (N - 2) as f64;
+    let n_f = N as f64;
+    let nx_f = nx as f64;
+
+    for p in 0..state.particles_x.len() {
+        let px = state.particles_x[p];
+        let py = state.particles_y[p];
+
+        // Bilinear interpolation of velocity at particle position
+        let i0 = px.floor().max(0.0).min(nx_f - 2.0) as i32;
+        let j0 = py.floor().max(0.0).min(n_f - 2.0) as i32;
+        let sx = px - i0 as f64;
+        let sy = py - j0 as f64;
+        let (vx_interp, vy_interp) = interpolate_velocity(&state.vx, &state.vy, i0, j0, sx, sy, nx);
+
+        let mut new_x = px + dt0 * vx_interp;
+        let mut new_y = py + dt0 * vy_interp;
+
+        // Y: ping-pong reflect within interior
+        let y_min = 2.0;
+        let y_max = n_f - 3.0;
+        let y_range = y_max - y_min;
+        if new_y < y_min || new_y > y_max {
+            let mut t = (new_y - y_min) % (2.0 * y_range);
+            if t < 0.0 {
+                t += 2.0 * y_range;
+            }
+            new_y = if t <= y_range {
+                y_min + t
+            } else {
+                y_max - (t - y_range)
+            };
+        }
+        new_y = new_y.clamp(y_min, y_max);
+
+        // X: ping-pong reflect within interior (solid walls, not periodic)
+        let x_min = 2.0;
+        let x_max = nx_f - 3.0;
+        let x_range = x_max - x_min;
+        if new_x < x_min || new_x > x_max {
+            let mut t = (new_x - x_min) % (2.0 * x_range);
+            if t < 0.0 {
+                t += 2.0 * x_range;
+            }
+            new_x = if t <= x_range {
+                x_min + t
+            } else {
+                x_max - (t - x_range)
+            };
+        }
+        new_x = new_x.clamp(x_min, x_max);
+
+        state.particles_x[p] = new_x;
+        state.particles_y[p] = new_y;
+    }
+}
+
 /// Advect particles for Karman flow.
 /// Particles that exit right or enter cylinder are respawned at left.
 pub(super) fn advect_particles_karman(state: &mut crate::state::SimState, dt: f64) {
