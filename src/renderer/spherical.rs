@@ -103,6 +103,7 @@ pub fn render_equirectangular(
         }
     }
 
+    draw_graticule_equirect(buf, cfg);
     render_color_bar(buf, cfg, colormap, vmin, vmax, &snap.field_name);
 }
 
@@ -191,14 +192,155 @@ pub fn render_orthographic(
             // Limb darkening
             let limb = nz.powf(0.3);
 
-            buf[off] = (rgba[0] as f64 * limb) as u8;
-            buf[off + 1] = (rgba[1] as f64 * limb) as u8;
-            buf[off + 2] = (rgba[2] as f64 * limb) as u8;
+            let mut r = (rgba[0] as f64 * limb) as u8;
+            let mut g = (rgba[1] as f64 * limb) as u8;
+            let mut b = (rgba[2] as f64 * limb) as u8;
+
+            // Graticule overlay
+            let pixel_deg = 180.0 / (radius * 2.0).max(1.0);
+            let threshold = pixel_deg * 0.8;
+            if let Some(is_eq) = graticule_hit(lon, lat, 30.0, 30.0, threshold) {
+                let gray = if is_eq { 220.0 } else { 160.0 };
+                let a = if is_eq { 0.5 } else { 0.35 };
+                r = (r as f64 * (1.0 - a) + gray * a) as u8;
+                g = (g as f64 * (1.0 - a) + gray * a) as u8;
+                b = (b as f64 * (1.0 - a) + gray * a) as u8;
+            }
+
+            buf[off] = r;
+            buf[off + 1] = g;
+            buf[off + 2] = b;
             buf[off + 3] = 255;
         }
     }
 
     render_color_bar(buf, cfg, colormap, vmin, vmax, &snap.field_name);
+}
+
+/// Check if (lon, lat) in radians is near a graticule line.
+/// Returns Some(true) for equator, Some(false) for other grid lines, None if not near any.
+fn graticule_hit(lon: f64, lat: f64, lon_step: f64, lat_step: f64, threshold: f64) -> Option<bool> {
+    let lat_deg = lat.to_degrees();
+    let lon_deg = lon.to_degrees();
+
+    // Latitude lines
+    let lat_rem = ((lat_deg % lat_step) + lat_step) % lat_step;
+    if lat_rem < threshold || lat_rem > lat_step - threshold {
+        // Check if equator
+        let is_equator = lat_deg.abs() < threshold;
+        return Some(is_equator);
+    }
+
+    // Longitude lines
+    let lon_rem = ((lon_deg % lon_step) + lon_step) % lon_step;
+    if lon_rem < threshold || lon_rem > lon_step - threshold {
+        return Some(false);
+    }
+
+    None
+}
+
+/// Blend a graticule line pixel over existing RGBA.
+fn blend_line(buf: &mut [u8], off: usize, gray: f64, alpha: f64) {
+    buf[off] = (buf[off] as f64 * (1.0 - alpha) + gray * alpha) as u8;
+    buf[off + 1] = (buf[off + 1] as f64 * (1.0 - alpha) + gray * alpha) as u8;
+    buf[off + 2] = (buf[off + 2] as f64 * (1.0 - alpha) + gray * alpha) as u8;
+}
+
+/// Draw text with dark shadow for readability over variable backgrounds.
+fn draw_text_shadow(buf: &mut [u8], fw: usize, x: usize, y: usize, text: &str, color: [u8; 3]) {
+    font::draw_text(buf, fw, x + 1, y + 1, text, [0, 0, 0]);
+    font::draw_text(buf, fw, x, y, text, color);
+}
+
+/// Draw graticule (lat/lon grid lines + labels) on equirectangular projection.
+fn draw_graticule_equirect(buf: &mut [u8], cfg: &SphericalRenderConfig) {
+    let dw = cfg.display_width;
+    let dh = cfg.display_height;
+    let fw = cfg.frame_width;
+    let fh = cfg.frame_height;
+
+    let label_color = [0xCC, 0xCC, 0xCC];
+    let char_h = font::FONT_HEIGHT;
+    let char_w = font::FONT_WIDTH + 1;
+
+    // Latitude lines every 30° (60N, 30N, EQ, 30S, 60S)
+    let lat_lines: [(i32, &str); 5] = [
+        (60, "60N"),
+        (30, "30N"),
+        (0, "EQ"),
+        (-30, "30S"),
+        (-60, "60S"),
+    ];
+
+    for &(lat_deg, label) in &lat_lines {
+        let lat = lat_deg as f64 * PI / 180.0;
+        let sy = ((PI / 2.0 - lat) / PI * dh as f64) as usize;
+        if sy >= dh {
+            continue;
+        }
+
+        let is_equator = lat_deg == 0;
+        let (gray, alpha) = if is_equator {
+            (220.0, 0.45)
+        } else {
+            (160.0, 0.3)
+        };
+
+        for sx in 0..dw {
+            let off = (sy * fw + sx) * 4;
+            if off + 3 < buf.len() {
+                blend_line(buf, off, gray, alpha);
+            }
+        }
+
+        // Label on left edge
+        let ly = if sy >= char_h / 2 {
+            sy - char_h / 2
+        } else {
+            0
+        };
+        let ly = ly.min(dh.saturating_sub(char_h));
+        if ly * fw * 4 + label.len() * char_w * 4 < buf.len() {
+            draw_text_shadow(buf, fw, 2, ly, label, label_color);
+        }
+    }
+
+    // Longitude lines every 30°
+    let lon_labels: [(u32, &str); 6] = [
+        (0, "0"),
+        (60, "60E"),
+        (120, "120E"),
+        (180, "180"),
+        (240, "120W"),
+        (300, "60W"),
+    ];
+
+    for lon_deg_i in 0..12u32 {
+        let lon_deg = lon_deg_i * 30;
+        let sx = (lon_deg as f64 / 360.0 * dw as f64) as usize;
+        if sx >= dw {
+            continue;
+        }
+
+        for sy in 0..dh {
+            let off = (sy * fw + sx) * 4;
+            if off + 3 < buf.len() {
+                blend_line(buf, off, 160.0, 0.3);
+            }
+        }
+
+        // Label at bottom edge (only every 60°)
+        if let Some((_, label)) = lon_labels.iter().find(|(d, _)| *d == lon_deg) {
+            let lw = label.len() * char_w;
+            let lx = if sx >= lw / 2 { sx - lw / 2 } else { 0 };
+            let lx = lx.min(dw.saturating_sub(lw));
+            let ly = dh.saturating_sub(char_h + 2);
+            if ly < fh && lx < fw {
+                draw_text_shadow(buf, fw, lx, ly, label, label_color);
+            }
+        }
+    }
 }
 
 fn data_range(data: &[f64]) -> (f64, f64) {
@@ -400,6 +542,34 @@ mod tests {
             Projection::Orthographic.toggle(),
             Projection::Equirectangular
         );
+    }
+
+    #[test]
+    fn test_graticule_hit_equator() {
+        // Near equator (lat ≈ 0)
+        let hit = graticule_hit(1.0, 0.005_f64.to_radians(), 30.0, 30.0, 0.5);
+        assert_eq!(hit, Some(true), "should detect equator");
+    }
+
+    #[test]
+    fn test_graticule_hit_lat_line() {
+        // Near 30N
+        let hit = graticule_hit(1.0, 30.1_f64.to_radians(), 30.0, 30.0, 0.5);
+        assert_eq!(hit, Some(false), "should detect 30N lat line");
+    }
+
+    #[test]
+    fn test_graticule_hit_lon_line() {
+        // Near 60E longitude, away from any lat line
+        let hit = graticule_hit(60.1_f64.to_radians(), 15.0_f64.to_radians(), 30.0, 30.0, 0.5);
+        assert_eq!(hit, Some(false), "should detect 60E lon line");
+    }
+
+    #[test]
+    fn test_graticule_hit_none() {
+        // Middle of a grid cell — no line
+        let hit = graticule_hit(45.0_f64.to_radians(), 15.0_f64.to_radians(), 30.0, 30.0, 0.5);
+        assert_eq!(hit, None, "should not detect any grid line");
     }
 
     #[test]
