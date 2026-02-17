@@ -10,6 +10,8 @@ pub struct SphericalSnapshot {
     pub field_data: Vec<f64>,
     pub field_names: Vec<String>,
     pub field_index: usize,
+    /// Pre-computed global data range (vmin, vmax) across all frames for this field.
+    pub global_range: Option<(f64, f64)>,
 }
 
 /// Find neighbors for interpolation on gaussian grid.

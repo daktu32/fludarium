@@ -6,6 +6,8 @@ use crate::spgrid::{SpgFrame, SpgReader};
 pub struct PlaybackState {
     frames: Vec<SpgFrame>,
     gauss_nodes: Vec<f64>,
+    /// Global (vmin, vmax) per field index, computed across all frames.
+    global_ranges: Vec<(f64, f64)>,
     pub im: usize,
     pub jm: usize,
     pub field_names: Vec<String>,
@@ -28,9 +30,36 @@ impl PlaybackState {
         let nm = reader.manifest.grid.nm;
         let gauss_nodes = compute_gauss_nodes(nm, jm);
 
+        // Pre-compute global min/max per field across all frames
+        let nfields = field_names.len();
+        let mut global_ranges = vec![(f64::INFINITY, f64::NEG_INFINITY); nfields];
+        for frame in &frames {
+            for (fi, (_name, data)) in frame.fields.iter().enumerate() {
+                if fi < nfields {
+                    for &v in data {
+                        if v < global_ranges[fi].0 {
+                            global_ranges[fi].0 = v;
+                        }
+                        if v > global_ranges[fi].1 {
+                            global_ranges[fi].1 = v;
+                        }
+                    }
+                }
+            }
+        }
+        // Apply diverging symmetric centering
+        for r in &mut global_ranges {
+            if r.0 < 0.0 && r.1 > 0.0 {
+                let abs_max = r.0.abs().max(r.1.abs());
+                r.0 = -abs_max;
+                r.1 = abs_max;
+            }
+        }
+
         Ok(Self {
             frames,
             gauss_nodes,
+            global_ranges,
             im,
             jm,
             field_names,
@@ -108,6 +137,7 @@ impl PlaybackState {
         } else {
             "?".to_string()
         };
+        let global_range = self.global_ranges.get(self.field_index).copied();
         SphericalSnapshot {
             im: self.im,
             jm: self.jm,
@@ -117,6 +147,7 @@ impl PlaybackState {
             field_data,
             field_names: self.field_names.clone(),
             field_index: self.field_index,
+            global_range,
         }
     }
 }

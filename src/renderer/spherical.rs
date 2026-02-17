@@ -70,8 +70,10 @@ pub fn render_equirectangular(
     buf.resize(fw * fh * 4, 0);
     buf.fill(0);
 
-    // Compute data range for color mapping
-    let (vmin, vmax) = data_range(&snap.field_data);
+    // Use global range if available, otherwise per-frame range
+    let (vmin, vmax) = snap
+        .global_range
+        .unwrap_or_else(|| data_range(&snap.field_data));
     let range = vmax - vmin;
     let inv_range = if range > 1e-30 { 1.0 / range } else { 1.0 };
 
@@ -125,7 +127,9 @@ pub fn render_orthographic(
     buf.resize(fw * fh * 4, 0);
     buf.fill(0);
 
-    let (vmin, vmax) = data_range(&snap.field_data);
+    let (vmin, vmax) = snap
+        .global_range
+        .unwrap_or_else(|| data_range(&snap.field_data));
     let range = vmax - vmin;
     let inv_range = if range > 1e-30 { 1.0 / range } else { 1.0 };
 
@@ -477,6 +481,7 @@ mod tests {
             field_data: vec![1.0; 32],
             field_names: vec!["test".to_string()],
             field_index: 0,
+            global_range: None,
         };
         let nodes = vec![-0.6, -0.2, 0.2, 0.6];
         let cfg = SphericalRenderConfig::equirectangular(200, 100);
@@ -502,6 +507,7 @@ mod tests {
             field_data: vec![1.0; 32],
             field_names: vec!["test".to_string()],
             field_index: 0,
+            global_range: None,
         };
         let nodes = vec![-0.6, -0.2, 0.2, 0.6];
         let cfg = SphericalRenderConfig::orthographic(200, 200);
