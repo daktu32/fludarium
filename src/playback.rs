@@ -1,12 +1,14 @@
 // Playback controller for spmodel-rs .spg and .nc output.
 
-use crate::spherical::SphericalSnapshot;
+use crate::spherical::{SphericalParticleSystem, SphericalSnapshot, PARTICLE_COUNT};
 use crate::spgrid::{SpgFrame, SpgReader};
 use gtool_rs::reader::GtoolReader;
 
 pub struct PlaybackState {
     frames: Vec<SpgFrame>,
     gauss_nodes: Vec<f64>,
+    /// Global (vmin, vmax) per field index, computed across all frames.
+    global_ranges: Vec<(f64, f64)>,
     pub im: usize,
     pub jm: usize,
     pub field_names: Vec<String>,
@@ -16,6 +18,16 @@ pub struct PlaybackState {
     pub speed: f64,
     accumulator: f64,
     pub model_name: String,
+    /// Index of "u_cos" field in the frame fields list.
+    u_cos_index: Option<usize>,
+    /// Index of "v_cos" field in the frame fields list.
+    v_cos_index: Option<usize>,
+    /// Particle system (only if velocity fields are present).
+    pub particles: Option<SphericalParticleSystem>,
+    /// Model dt (time between consecutive steps in simulation units).
+    model_dt: f64,
+    /// Output interval in steps.
+    output_interval: u64,
 }
 
 impl PlaybackState {
@@ -29,9 +41,62 @@ impl PlaybackState {
         let nm = reader.manifest.grid.nm;
         let gauss_nodes = compute_gauss_nodes(nm, jm);
 
+        // Pre-compute global min/max per field across all frames
+        let nfields = field_names.len();
+        let mut global_ranges = vec![(f64::INFINITY, f64::NEG_INFINITY); nfields];
+        for frame in &frames {
+            for (fi, (_name, data)) in frame.fields.iter().enumerate() {
+                if fi < nfields {
+                    for &v in data {
+                        if v < global_ranges[fi].0 {
+                            global_ranges[fi].0 = v;
+                        }
+                        if v > global_ranges[fi].1 {
+                            global_ranges[fi].1 = v;
+                        }
+                    }
+                }
+            }
+        }
+        // Apply diverging symmetric centering
+        for r in &mut global_ranges {
+            if r.0 < 0.0 && r.1 > 0.0 {
+                let abs_max = r.0.abs().max(r.1.abs());
+                r.0 = -abs_max;
+                r.1 = abs_max;
+            }
+        }
+
+        // Pad range for fields with small variation relative to their mean.
+        // e.g. geopotential phi ≈ 100 ± 0.08 → without padding the tiny
+        // fluctuation fills the full color spectrum.  Expanding the range
+        // to at least 1% of |mean| keeps the variation visually subtle.
+        for r in &mut global_ranges {
+            let mean = (r.0 + r.1) * 0.5;
+            let current_range = r.1 - r.0;
+            let min_range = mean.abs() * 0.01;
+            if current_range < min_range && mean.abs() > 1e-10 {
+                r.0 = mean - min_range * 0.5;
+                r.1 = mean + min_range * 0.5;
+            }
+        }
+
+        // Detect velocity fields
+        let u_cos_index = field_names.iter().position(|n| n == "u_cos");
+        let v_cos_index = field_names.iter().position(|n| n == "v_cos");
+        let particles = if u_cos_index.is_some() && v_cos_index.is_some() {
+            Some(SphericalParticleSystem::new(PARTICLE_COUNT))
+        } else {
+            None
+        };
+
+        let model_dt = reader.manifest.time.dt;
+        let output_interval = reader.manifest.time.output_interval;
+
         Ok(Self {
             frames,
             gauss_nodes,
+            global_ranges,
             im,
             jm,
             field_names,
@@ -41,6 +106,11 @@ impl PlaybackState {
             speed: 1.0,
             accumulator: 0.0,
             model_name: reader.manifest.model.clone(),
+            u_cos_index,
+            v_cos_index,
+            particles,
+            model_dt,
+            output_interval,
         })
     }
 
@@ -93,21 +163,60 @@ impl PlaybackState {
         self.accumulator += dt_seconds * self.speed * 30.0; // 30 frames/sec base rate
         while self.accumulator >= 1.0 {
             self.accumulator -= 1.0;
+            let prev_frame = self.current_frame;
             if self.current_frame + 1 < self.frames.len() {
                 self.current_frame += 1;
             } else {
                 self.current_frame = 0; // loop
             }
+            if self.current_frame != prev_frame {
+                self.advect_particles();
+            }
         }
+    }
+
+    fn advect_particles(&mut self) {
+        let (Some(ui), Some(vi)) = (self.u_cos_index, self.v_cos_index) else {
+            return;
+        };
+        let Some(ref mut ps) = self.particles else {
+            return;
+        };
+
+        let frame = &self.frames[self.current_frame];
+        if ui >= frame.fields.len() || vi >= frame.fields.len() {
+            return;
+        }
+
+        let cu_data = &frame.fields[ui].1;
+        let cv_data = &frame.fields[vi].1;
+        let sim_dt = self.model_dt * self.output_interval as f64;
+
+        ps.advect(cu_data, cv_data, self.im, self.jm, &self.gauss_nodes, sim_dt);
     }
 
     pub fn toggle_play(&mut self) {
         self.playing = !self.playing;
     }
 
+    pub fn toggle_particles(&mut self) {
+        if let Some(ref mut ps) = self.particles {
+            ps.enabled = !ps.enabled;
+        }
+    }
+
+    pub fn has_particles(&self) -> bool {
+        self.particles.is_some()
+    }
+
+    pub fn particles_enabled(&self) -> bool {
+        self.particles.as_ref().map_or(false, |ps| ps.enabled)
+    }
+
     pub fn step_forward(&mut self) {
         if self.current_frame + 1 < self.frames.len() {
             self.current_frame += 1;
+            self.advect_particles();
         }
     }
 
@@ -143,6 +252,7 @@ impl PlaybackState {
         } else {
             "?".to_string()
         };
+        let global_range = self.global_ranges.get(self.field_index).copied();
         SphericalSnapshot {
             im: self.im,
             jm: self.jm,
@@ -152,6 +262,7 @@ impl PlaybackState {
             field_data,
             field_names: self.field_names.clone(),
             field_index: self.field_index,
+            global_range,
         }
     }
 }
