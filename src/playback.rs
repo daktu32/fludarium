@@ -127,12 +127,20 @@ impl PlaybackState {
         let reader = GtoolReader::open(path)?;
         let info = reader.file_info();
         let frames = reader.read_all_frames()?;
+        let im = info.grid.im;
+        let jm = info.grid.jm;
+        let is_1d = jm == 1;
 
         // Read gauss nodes directly from the NetCDF file (no computation needed)
-        let gauss_nodes = reader
-            .gauss_nodes()
-            .unwrap_or_else(|| gtool_rs::coord::gauss_nodes(info.grid.jm));
+        let gauss_nodes = if is_1d {
+            Vec::new()
+        } else {
+            reader
+                .gauss_nodes()
+                .unwrap_or_else(|| gtool_rs::coord::gauss_nodes(jm))
+        };
 
+        let field_names = info.field_names.clone();
         let spg_frames: Vec<SpgFrame> = frames
             .into_iter()
             .map(|f| SpgFrame {
@@ -142,18 +150,72 @@ impl PlaybackState {
             })
             .collect();
 
+        // Pre-compute global min/max per field across all frames
+        let nfields = field_names.len();
+        let mut global_ranges = vec![(f64::INFINITY, f64::NEG_INFINITY); nfields];
+        for frame in &spg_frames {
+            for (fi, (_name, data)) in frame.fields.iter().enumerate() {
+                if fi < nfields {
+                    for &v in data {
+                        if v < global_ranges[fi].0 {
+                            global_ranges[fi].0 = v;
+                        }
+                        if v > global_ranges[fi].1 {
+                            global_ranges[fi].1 = v;
+                        }
+                    }
+                }
+            }
+        }
+        for r in &mut global_ranges {
+            if r.0 < 0.0 && r.1 > 0.0 {
+                let abs_max = r.0.abs().max(r.1.abs());
+                r.0 = -abs_max;
+                r.1 = abs_max;
+            }
+        }
+        for r in &mut global_ranges {
+            let mean = (r.0 + r.1) * 0.5;
+            let current_range = r.1 - r.0;
+            let min_range = mean.abs() * 0.01;
+            if current_range < min_range && mean.abs() > 1e-10 {
+                r.0 = mean - min_range * 0.5;
+                r.1 = mean + min_range * 0.5;
+            }
+        }
+
+        // Detect velocity fields (skip for 1D)
+        let u_cos_index = if is_1d { None } else { field_names.iter().position(|n| n == "u_cos") };
+        let v_cos_index = if is_1d { None } else { field_names.iter().position(|n| n == "v_cos") };
+        let particles = if u_cos_index.is_some() && v_cos_index.is_some() {
+            Some(SphericalParticleSystem::new(PARTICLE_COUNT))
+        } else {
+            None
+        };
+
+        let model_dt = info.time.dt;
+        let output_interval = info.time.output_interval;
+        let domain_length = reader.domain_length().unwrap_or(0.0);
+
         Ok(Self {
             frames: spg_frames,
             gauss_nodes,
-            im: info.grid.im,
-            jm: info.grid.jm,
-            field_names: info.field_names.clone(),
+            global_ranges,
+            im,
+            jm,
+            field_names,
             field_index: 0,
             current_frame: 0,
             playing: true,
             speed: 1.0,
             accumulator: 0.0,
             model_name: info.model.clone(),
+            u_cos_index,
+            v_cos_index,
+            particles,
+            model_dt,
+            output_interval,
+            domain_length,
         })
     }
 
