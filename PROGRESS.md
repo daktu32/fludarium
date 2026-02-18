@@ -264,6 +264,32 @@
 - Verified `cargo install --path .` produces working `fludarium` binary
 - Removed obsolete `PRD.md`
 
+### spmodel-rs 連携: 球面データ再生モード
+- **`--playback dir/`**: spmodel-rs の `.spg` 出力ディレクトリを指定して球面データ再生
+- **SpgReader**: `.spg` バイナリ + `manifest.json` リーダー (standalone)
+- **SphericalSnapshot**: 球面データ構造 + ガウス格子補間
+- **PlaybackState**: 再生制御 (play/pause, seek, speed, field選択)
+- **等距円筒図法 + 正射影**: P キーで切替
+- **BlueWhiteRed**: 発散型カラーマップ (渦度等)
+- **グラティキュール**: 緯度経度線 + ラベル (両投影対応)
+- **グローバルカラーレンジ**: 全フレーム横断 min/max 事前計算、チカチカ防止
+- **HUD フィールドバッジ**: 半透明ダーク背景の表示フィールド名 + インデックス
+- **レンジパディング**: 微小変動フィールド (geopotential 等) の表示改善
+- **粒子移流**: u_cos/v_cos フィールドがあれば自動で粒子トレーサーを表示
+- **1D line plot**: KdV等の周期1Dデータを折れ線グラフで再生
+
+### NetCDF (.nc) 再生対応 via gtool-rs
+- **`--playback file.nc`**: gtool-rs の GtoolReader 経由で .nc ファイルを直接再生
+- **ガウスノード**: NetCDF の `mu` 座標変数から直接読み込み (計算不要)
+- **全機能対応**: global_ranges、粒子移流、HUD、グラティキュール全て .nc でも動作
+- **2D/1D 自動判別**: Gaussian grid は球面再生、Periodic は 1D line plot
+
+## Test Summary
+- **214 tests, all passing** (1 ignored: diagnostic)
+- 球面関連: graticule 4 tests, spherical interpolation/particle 7 tests, lineplot 3 tests
+- playback: gauss_nodes 4 tests
+- font: glyph/draw_text/status 5 tests
+
 ## Next Steps
 - Tag v0.1.0 and push for GitHub Release
 - Create `daktu32/homebrew-fludarium` tap repository with formula
