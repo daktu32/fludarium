@@ -101,7 +101,7 @@ pub(crate) const BAR_GAP: usize = 6;
 pub(crate) const BAR_WIDTH: usize = 20;
 pub(crate) const TICK_LEN: usize = 4;
 pub(crate) const LABEL_GAP: usize = 2;
-pub(crate) const LABEL_WIDTH: usize = 24;
+pub(crate) const LABEL_WIDTH: usize = 32;
 pub(crate) const BAR_TOTAL: usize = BAR_GAP + BAR_WIDTH + TICK_LEN + LABEL_GAP + LABEL_WIDTH;
 
 #[cfg(test)]

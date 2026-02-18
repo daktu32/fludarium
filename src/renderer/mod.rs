@@ -1,11 +1,13 @@
 mod color;
 mod font;
+pub mod lineplot;
 pub mod spherical;
 
 // Re-export public API
 pub use color::ColorMap;
 pub use font::render_status;
 pub(crate) use font::{draw_text, draw_text_sized, FONT_HEIGHT, FONT_WIDTH, STATUS_BAR_HEIGHT};
+pub(crate) use font::render_field_badge;
 
 use color::{BAR_GAP, BAR_TOTAL, BAR_WIDTH, LABEL_GAP, TICK_LEN};
 use font::FONT_HEIGHT as FH;
@@ -44,6 +46,33 @@ impl VizMode {
             VizMode::None => "none",
         }
     }
+
+    /// Model-dependent human-readable display name for HUD badge.
+    pub fn display_name(self, model: crate::state::FluidModel) -> &'static str {
+        use crate::state::FluidModel;
+        match (self, model) {
+            (VizMode::Field, FluidModel::RayleighBenard) => "temperature",
+            (VizMode::Field, FluidModel::KarmanVortex) => "dye conc.",
+            (VizMode::Field, FluidModel::KelvinHelmholtz) => "shear layer",
+            (VizMode::Field, FluidModel::LidDrivenCavity) => "velocity mag.",
+            (VizMode::Vorticity, _) => "vorticity",
+            (VizMode::Streamline, _) => "streamline",
+            (VizMode::None, _) => "particles",
+        }
+    }
+
+    /// Zero-based index for badge display.
+    pub fn index(self) -> usize {
+        match self {
+            VizMode::Field => 0,
+            VizMode::Vorticity => 1,
+            VizMode::Streamline => 2,
+            VizMode::None => 3,
+        }
+    }
+
+    /// Total number of VizMode variants.
+    pub const COUNT: usize = 4;
 }
 
 /// Dynamic render layout computed from window pixel size.
@@ -238,7 +267,7 @@ fn draw_line_blended(
 
 /// Render field + color bar into a pre-allocated RGBA buffer.
 /// The buffer is resized and zeroed as needed.
-pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap, show_arrows: bool) {
+pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap, show_arrows: bool, show_particles: bool, model: crate::state::FluidModel) {
     let dw = cfg.display_width;
     let dh = cfg.display_height;
     let frame_width = cfg.frame_width;
@@ -470,12 +499,17 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     }
 
     // Draw type label above the bar
-    let type_label = viz_mode.label();
+    let type_label = viz_mode.display_name(model);
     let type_label_y = if dh > FH + 4 { 2 } else { 0 };
-    // Right-align within bar area
+    // Left-align at bar_x if name is wider than the bar
     let type_label_w = type_label.len() * (FONT_WIDTH + 1);
-    let type_label_x = if bar_x + BAR_WIDTH / 2 >= type_label_w / 2 {
-        bar_x + BAR_WIDTH / 2 - type_label_w / 2
+    let type_label_x = if type_label_w <= BAR_WIDTH {
+        // Center within bar
+        if bar_x + BAR_WIDTH / 2 >= type_label_w / 2 {
+            bar_x + BAR_WIDTH / 2 - type_label_w / 2
+        } else {
+            bar_x
+        }
     } else {
         bar_x
     };
@@ -554,6 +588,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     }
 
     // Draw particles as glowing trails with meteor color palette.
+    if show_particles {
     let sx = cfg.scale_x();
     let sy = cfg.scale_y();
     let tile_width_px = (dw as isize) / tiles as isize;
@@ -660,6 +695,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
             }
         }
     }
+    } // show_particles
 
 }
 
@@ -667,7 +703,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
 #[cfg(any(test, debug_assertions))]
 pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap) -> Vec<u8> {
     let mut buf = Vec::new();
-    render_into(&mut buf, snap, cfg, viz_mode, colormap, false);
+    render_into(&mut buf, snap, cfg, viz_mode, colormap, false, true, crate::state::FluidModel::RayleighBenard);
     buf
 }
 
@@ -1036,7 +1072,7 @@ mod tests {
         let snap = state.snapshot();
         let cfg = test_config();
         let mut buf = Vec::new();
-        render_into(&mut buf, &snap, &cfg, VizMode::None, ColorMap::TokyoNight, true);
+        render_into(&mut buf, &snap, &cfg, VizMode::None, ColorMap::TokyoNight, true, true, crate::state::FluidModel::RayleighBenard);
 
         // Count non-black pixels in display area (excluding status bar / color bar)
         let dw = cfg.display_width;
@@ -1063,9 +1099,9 @@ mod tests {
         let cfg = test_config();
 
         let mut buf_off = Vec::new();
-        render_into(&mut buf_off, &snap, &cfg, VizMode::Field, ColorMap::TokyoNight, false);
+        render_into(&mut buf_off, &snap, &cfg, VizMode::Field, ColorMap::TokyoNight, false, true, crate::state::FluidModel::RayleighBenard);
         let mut buf_on = Vec::new();
-        render_into(&mut buf_on, &snap, &cfg, VizMode::Field, ColorMap::TokyoNight, true);
+        render_into(&mut buf_on, &snap, &cfg, VizMode::Field, ColorMap::TokyoNight, true, true, crate::state::FluidModel::RayleighBenard);
 
         let diffs: usize = buf_off.iter().zip(buf_on.iter())
             .filter(|(a, b)| a != b)
