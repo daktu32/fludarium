@@ -27,6 +27,8 @@ pub struct PlaybackState {
     model_dt: f64,
     /// Output interval in steps.
     output_interval: u64,
+    /// Domain length for 1D periodic data.
+    domain_length: f64,
 }
 
 impl PlaybackState {
@@ -35,10 +37,15 @@ impl PlaybackState {
         let im = reader.manifest.grid.im;
         let jm = reader.manifest.grid.jm;
         let field_names = reader.manifest.fields.clone();
+        let is_1d = jm == 1;
 
-        // Compute gauss nodes from nm
-        let nm = reader.manifest.grid.nm;
-        let gauss_nodes = compute_gauss_nodes(nm, jm);
+        // Compute gauss nodes from nm (skip for 1D data)
+        let gauss_nodes = if is_1d {
+            Vec::new()
+        } else {
+            let nm = reader.manifest.grid.nm;
+            compute_gauss_nodes(nm, jm)
+        };
 
         // Pre-compute global min/max per field across all frames
         let nfields = field_names.len();
@@ -80,9 +87,9 @@ impl PlaybackState {
             }
         }
 
-        // Detect velocity fields
-        let u_cos_index = field_names.iter().position(|n| n == "u_cos");
-        let v_cos_index = field_names.iter().position(|n| n == "v_cos");
+        // Detect velocity fields (skip for 1D)
+        let u_cos_index = if is_1d { None } else { field_names.iter().position(|n| n == "u_cos") };
+        let v_cos_index = if is_1d { None } else { field_names.iter().position(|n| n == "v_cos") };
         let particles = if u_cos_index.is_some() && v_cos_index.is_some() {
             Some(SphericalParticleSystem::new(PARTICLE_COUNT))
         } else {
@@ -91,6 +98,7 @@ impl PlaybackState {
 
         let model_dt = reader.manifest.time.dt;
         let output_interval = reader.manifest.time.output_interval;
+        let domain_length = reader.manifest.domain_length();
 
         Ok(Self {
             frames,
@@ -110,6 +118,7 @@ impl PlaybackState {
             particles,
             model_dt,
             output_interval,
+            domain_length,
         })
     }
 
@@ -202,6 +211,53 @@ impl PlaybackState {
     pub fn next_field(&mut self) {
         if !self.field_names.is_empty() {
             self.field_index = (self.field_index + 1) % self.field_names.len();
+        }
+    }
+
+    /// True if this is 1D data (jm == 1).
+    pub fn is_1d(&self) -> bool {
+        self.jm == 1
+    }
+
+    /// Domain length for 1D periodic data.
+    pub fn domain_length(&self) -> f64 {
+        self.domain_length
+    }
+
+    /// Current field data slice for 1D rendering.
+    pub fn field_data(&self) -> &[f64] {
+        let frame = &self.frames[self.current_frame];
+        if self.field_index < frame.fields.len() {
+            &frame.fields[self.field_index].1
+        } else {
+            &[]
+        }
+    }
+
+    /// Global (vmin, vmax) for the currently selected field.
+    pub fn current_global_range(&self) -> (f64, f64) {
+        self.global_ranges
+            .get(self.field_index)
+            .copied()
+            .unwrap_or((0.0, 1.0))
+    }
+
+    /// Step number of the current frame.
+    pub fn current_step(&self) -> u64 {
+        self.frames[self.current_frame].step
+    }
+
+    /// Simulation time of the current frame.
+    pub fn current_time(&self) -> f64 {
+        self.frames[self.current_frame].time
+    }
+
+    /// Name of the currently selected field.
+    pub fn current_field_name(&self) -> &str {
+        if self.field_index < self.field_names.len() {
+            &self.field_names[self.field_index]
+        } else {
+            "?"
         }
     }
 

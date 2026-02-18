@@ -230,11 +230,11 @@ pub fn render_overlay(
     let defs = param_defs(model);
     let param_count = defs.len();
 
-    // Font: 2/3 of 2x → 7×9 pixels (nearest-neighbor resize from 5×7)
+    // Native 7×11 font (no resize needed)
     let cw: usize = 7;
-    let ch: usize = 9;
+    let ch: usize = 11;
     let sc = cw + cw / 5 + 1;          // char step = 9px (proportional spacing)
-    let row_h = ch + 4;                // row height = 13px
+    let row_h = ch + 4;                // row height = 15px
     let pad = 10;                       // inner padding
 
     // Compute panel width from content

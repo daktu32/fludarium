@@ -159,7 +159,7 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
     } else {
         match model {
             state::FluidModel::RayleighBenard => format!(
-                "visc={:.3} diff={:.3} dt={:.3} buoy={:.1} src={:.1} cool={:.1} base={:.2} | tiles={} p={} | space=params a=arrows r=restart m=model",
+                "visc={:.3} diff={:.3} dt={:.3} buoy={:.1} src={:.1} cool={:.1} base={:.2} | tiles={} p={} | space=params v=field c=colormap t=particles a=arrows r=restart m=model",
                 params.visc, params.diff, params.dt,
                 params.heat_buoyancy, params.source_strength, params.cool_rate,
                 params.bottom_base, tiles, num_particles,
@@ -173,18 +173,18 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
                     renderer::VizMode::None => "none",
                 };
                 format!(
-                    "karman [{viz}] | visc={:.3} dt={:.3} u0={:.2} re={:.0} | p={} | space=params v=viz a=arrows m=model",
+                    "karman [{viz}] | visc={:.3} dt={:.3} u0={:.2} re={:.0} | p={} | space=params v=field c=colormap t=particles a=arrows m=model",
                     params.visc, params.dt, params.inflow_vel, re, num_particles,
                 )
             }
             state::FluidModel::KelvinHelmholtz => format!(
-                "kh | visc={:.4} dt={:.3} shear={:.3} conf={:.1} | p={} | space=params a=arrows r=restart m=model",
+                "kh | visc={:.4} dt={:.3} shear={:.3} conf={:.1} | p={} | space=params v=field c=colormap t=particles a=arrows r=restart m=model",
                 params.visc, params.dt, params.shear_velocity, params.confinement, num_particles,
             ),
             state::FluidModel::LidDrivenCavity => {
                 let re = params.lid_velocity * (state::N as f64) / params.visc;
                 format!(
-                    "cavity | visc={:.3} dt={:.3} lid={:.2} re={:.0} | p={} | space=params a=arrows r=restart m=model",
+                    "cavity | visc={:.3} dt={:.3} lid={:.2} re={:.0} | p={} | space=params v=field c=colormap t=particles a=arrows r=restart m=model",
                     params.visc, params.dt, params.lid_velocity, re, num_particles,
                 )
             }
@@ -375,12 +375,21 @@ fn run_gui() {
     let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
     let mut show_arrows = false;
-    let mut colormap = match model {
-        state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
-        state::FluidModel::KarmanVortex => ColorMap::SolarWind,
-        state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
-        _ => ColorMap::TokyoNight,
+    let mut show_particles = true;
+    let colormaps = [
+        ColorMap::BlueWhiteRed,
+        ColorMap::OceanLava,
+        ColorMap::TokyoNight,
+        ColorMap::SolarWind,
+        ColorMap::ArcticIce,
+    ];
+    let mut colormap_idx = match model {
+        state::FluidModel::KelvinHelmholtz => 1,
+        state::FluidModel::KarmanVortex => 3,
+        state::FluidModel::LidDrivenCavity => 4,
+        _ => 2,
     };
+    let mut colormap = colormaps[colormap_idx];
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
     let sim_nx = compute_sim_nx(win_width, win_height, model);
@@ -510,12 +519,13 @@ fn run_gui() {
                 state::FluidModel::KarmanVortex => 1,
                 _ => rb_tiles,
             };
-            colormap = match model {
-                state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
-                state::FluidModel::KarmanVortex => ColorMap::SolarWind,
-                state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
-                _ => ColorMap::TokyoNight,
+            colormap_idx = match model {
+                state::FluidModel::KelvinHelmholtz => 1,
+                state::FluidModel::KarmanVortex => 3,
+                state::FluidModel::LidDrivenCavity => 4,
+                _ => 2,
             };
+            colormap = colormaps[colormap_idx];
             let (cur_w, cur_h) = window.get_size();
             let new_nx = compute_sim_nx(cur_w, cur_h, model);
             let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
@@ -550,6 +560,19 @@ fn run_gui() {
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             viz_mode = viz_mode.next();
             status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
+            needs_redraw = true;
+        }
+
+        // C: cycle colormap
+        if window.is_key_pressed(Key::C, KeyRepeat::No) {
+            colormap_idx = (colormap_idx + 1) % colormaps.len();
+            colormap = colormaps[colormap_idx];
+            needs_redraw = true;
+        }
+
+        // T: toggle particle display
+        if window.is_key_pressed(Key::T, KeyRepeat::No) {
+            show_particles = !show_particles;
             needs_redraw = true;
         }
 
@@ -588,7 +611,15 @@ fn run_gui() {
                 bgm_started = true;
                 unpause_bgm();
             }
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap, show_arrows);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap, show_arrows, show_particles, model);
+            renderer::render_field_badge(
+                &mut rgba_buf,
+                render_cfg.frame_width,
+                render_cfg.display_height,
+                viz_mode.display_name(model),
+                viz_mode.index(),
+                renderer::VizMode::COUNT,
+            );
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -609,7 +640,15 @@ fn run_gui() {
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap, show_arrows);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap, show_arrows, show_particles, model);
+                renderer::render_field_badge(
+                    &mut rgba_buf,
+                    render_cfg.frame_width,
+                    render_cfg.display_height,
+                    viz_mode.display_name(model),
+                    viz_mode.index(),
+                    renderer::VizMode::COUNT,
+                );
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -728,12 +767,21 @@ fn run_headless() {
     let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
     let mut show_arrows = false;
-    let mut colormap = match model {
-        state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
-        state::FluidModel::KarmanVortex => ColorMap::SolarWind,
-        state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
-        _ => ColorMap::TokyoNight,
+    let mut show_particles = true;
+    let colormaps = [
+        ColorMap::BlueWhiteRed,
+        ColorMap::OceanLava,
+        ColorMap::TokyoNight,
+        ColorMap::SolarWind,
+        ColorMap::ArcticIce,
+    ];
+    let mut colormap_idx = match model {
+        state::FluidModel::KelvinHelmholtz => 1,
+        state::FluidModel::KarmanVortex => 3,
+        state::FluidModel::LidDrivenCavity => 4,
+        _ => 2,
     };
+    let mut colormap = colormaps[colormap_idx];
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
     // sim_nx based on terminal aspect ratio (not reduced render dims)
@@ -897,12 +945,13 @@ fn run_headless() {
                             state::FluidModel::KarmanVortex => 1,
                             _ => rb_tiles,
                         };
-                        colormap = match model {
-                            state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
-                            state::FluidModel::KarmanVortex => ColorMap::SolarWind,
-                            state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
-                            _ => ColorMap::TokyoNight,
+                        colormap_idx = match model {
+                            state::FluidModel::KelvinHelmholtz => 1,
+                            state::FluidModel::KarmanVortex => 3,
+                            state::FluidModel::LidDrivenCavity => 4,
+                            _ => 2,
                         };
+                        colormap = colormaps[colormap_idx];
                         let new_nx = compute_sim_nx(term_width, term_height, model);
                         let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
                         let _ = reset_tx.send((model, new_sim));
@@ -919,6 +968,15 @@ fn run_headless() {
                     TermKey::Char('v') => {
                         viz_mode = viz_mode.next();
                         status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
+                        needs_redraw = true;
+                    }
+                    TermKey::Char('c') => {
+                        colormap_idx = (colormap_idx + 1) % colormaps.len();
+                        colormap = colormaps[colormap_idx];
+                        needs_redraw = true;
+                    }
+                    TermKey::Char('t') => {
+                        show_particles = !show_particles;
                         needs_redraw = true;
                     }
                     TermKey::Char('a') => {
@@ -973,7 +1031,15 @@ fn run_headless() {
             if rgba_buf.is_empty() {
                 rgba_buf = buf_return_rx.try_recv().unwrap_or_default();
             }
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap, show_arrows);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap, show_arrows, show_particles, model);
+            renderer::render_field_badge(
+                &mut rgba_buf,
+                render_cfg.frame_width,
+                render_cfg.display_height,
+                viz_mode.display_name(model),
+                viz_mode.index(),
+                renderer::VizMode::COUNT,
+            );
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -1011,7 +1077,15 @@ fn run_headless() {
                 if rgba_buf.is_empty() {
                     rgba_buf = buf_return_rx.try_recv().unwrap_or_default();
                 }
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap, show_arrows);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap, show_arrows, show_particles, model);
+                renderer::render_field_badge(
+                    &mut rgba_buf,
+                    render_cfg.frame_width,
+                    render_cfg.display_height,
+                    viz_mode.display_name(model),
+                    viz_mode.index(),
+                    renderer::VizMode::COUNT,
+                );
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -1072,6 +1146,7 @@ fn run_gui_playback(dir: &str) {
         Projection, SphericalRenderConfig, render_equirectangular, render_orthographic,
         render_particles_equirect, render_particles_ortho, render_field_badge,
     };
+    use renderer::lineplot::{LinePlotConfig, render_lineplot};
 
     eprintln!("Loading {dir}...");
     let reader = spgrid::SpgReader::open(dir).unwrap_or_else(|e| {
@@ -1094,6 +1169,11 @@ fn run_gui_playback(dir: &str) {
     });
     eprintln!("  {} frames loaded.", pb.frame_count());
 
+    let is_1d = pb.is_1d();
+    if is_1d {
+        eprintln!("  1D mode (jm=1), using line plot renderer.");
+    }
+
     let win_width = Defaults::WIN_WIDTH;
     let win_height = Defaults::WIN_HEIGHT;
     let target_fps = Defaults::TARGET_FPS;
@@ -1103,11 +1183,15 @@ fn run_gui_playback(dir: &str) {
     let mut cam_lat = 0.0_f64;
     let mut cam_lon = 0.0_f64;
 
-    let title = format!(
-        "fludarium \u{2223} {} \u{00b7} {}",
-        pb.model_name,
-        projection.label()
-    );
+    let title = if is_1d {
+        format!("fludarium \u{2223} {} \u{00b7} 1D", pb.model_name)
+    } else {
+        format!(
+            "fludarium \u{2223} {} \u{00b7} {}",
+            pb.model_name,
+            projection.label()
+        )
+    };
     let mut window = Window::new(
         &title,
         win_width,
@@ -1164,7 +1248,10 @@ fn run_gui_playback(dir: &str) {
         }
 
         if window.is_key_pressed(Key::Right, KeyRepeat::Yes) {
-            if projection == Projection::Orthographic {
+            if is_1d {
+                pb.step_forward();
+                needs_redraw = true;
+            } else if projection == Projection::Orthographic {
                 cam_lon += 10.0_f64.to_radians();
                 needs_redraw = true;
             } else {
@@ -1173,7 +1260,10 @@ fn run_gui_playback(dir: &str) {
             }
         }
         if window.is_key_pressed(Key::Left, KeyRepeat::Yes) {
-            if projection == Projection::Orthographic {
+            if is_1d {
+                pb.step_backward();
+                needs_redraw = true;
+            } else if projection == Projection::Orthographic {
                 cam_lon -= 10.0_f64.to_radians();
                 needs_redraw = true;
             } else {
@@ -1182,13 +1272,13 @@ fn run_gui_playback(dir: &str) {
             }
         }
         if window.is_key_pressed(Key::Up, KeyRepeat::Yes) {
-            if projection == Projection::Orthographic {
+            if !is_1d && projection == Projection::Orthographic {
                 cam_lat = (cam_lat + 5.0_f64.to_radians()).min(std::f64::consts::FRAC_PI_2);
                 needs_redraw = true;
             }
         }
         if window.is_key_pressed(Key::Down, KeyRepeat::Yes) {
-            if projection == Projection::Orthographic {
+            if !is_1d && projection == Projection::Orthographic {
                 cam_lat = (cam_lat - 5.0_f64.to_radians()).max(-std::f64::consts::FRAC_PI_2);
                 needs_redraw = true;
             }
@@ -1203,12 +1293,12 @@ fn run_gui_playback(dir: &str) {
             needs_redraw = true;
         }
 
-        if window.is_key_pressed(Key::F, KeyRepeat::No) {
+        if window.is_key_pressed(Key::V, KeyRepeat::No) {
             pb.next_field();
             needs_redraw = true;
         }
 
-        if window.is_key_pressed(Key::P, KeyRepeat::No) {
+        if !is_1d && window.is_key_pressed(Key::P, KeyRepeat::No) {
             projection = projection.toggle();
             needs_redraw = true;
         }
@@ -1219,7 +1309,7 @@ fn run_gui_playback(dir: &str) {
             needs_redraw = true;
         }
 
-        if window.is_key_pressed(Key::T, KeyRepeat::No) {
+        if !is_1d && window.is_key_pressed(Key::T, KeyRepeat::No) {
             pb.toggle_particles();
             needs_redraw = true;
         }
@@ -1234,114 +1324,166 @@ fn run_gui_playback(dir: &str) {
         let (cur_w, cur_h) = window.get_size();
 
         if needs_redraw {
-            let snap = pb.snapshot();
-            let gauss = pb.gauss_nodes();
+            if is_1d {
+                // --- 1D line plot rendering ---
+                let lp_cfg = LinePlotConfig::new(cur_w, cur_h);
+                let data = pb.field_data();
+                let y_range = pb.current_global_range();
+                let field_name = pb.current_field_name().to_string();
+                let field_count = pb.field_names.len();
+                let field_index = pb.field_index;
 
-            match projection {
-                Projection::Equirectangular => {
-                    let cfg = SphericalRenderConfig::equirectangular(cur_w, cur_h);
-                    render_equirectangular(&mut rgba_buf, &snap, gauss, &cfg, colormap);
+                render_lineplot(
+                    &mut rgba_buf,
+                    &lp_cfg,
+                    data,
+                    pb.domain_length(),
+                    y_range,
+                    &field_name,
+                    field_index,
+                    field_count,
+                    colormap,
+                );
 
-                    // Particle overlay
-                    if let Some(ref ps) = pb.particles {
-                        if ps.enabled {
-                            render_particles_equirect(&mut rgba_buf, ps, &cfg);
-                        }
-                    }
-
-                    // Field badge
-                    render_field_badge(
-                        &mut rgba_buf, &cfg,
-                        &snap.field_name, snap.field_index, snap.field_names.len(),
-                    );
-
-                    // Status bar
-                    let particle_status = if pb.has_particles() {
-                        if pb.particles_enabled() { " [T:particles]" } else { " [T:off]" }
-                    } else { "" };
-                    let status = format!(
-                        "frame {}/{} t={:.3} x{:.1} {}{}",
-                        pb.current_frame,
-                        pb.frame_count(),
-                        snap.time,
-                        pb.speed,
-                        if pb.playing { ">" } else { "||" },
-                        particle_status,
-                    );
-                    renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
-                        display_width: cfg.display_width,
-                        display_height: cfg.display_height,
-                        frame_width: cfg.frame_width,
-                        frame_height: cfg.frame_height,
+                // Status bar
+                let status = format!(
+                    "frame {}/{} step={} t={:.4} x{:.1} {}",
+                    pb.current_frame + 1,
+                    pb.frame_count(),
+                    pb.current_step(),
+                    pb.current_time(),
+                    pb.speed,
+                    if pb.playing { ">" } else { "||" },
+                );
+                renderer::render_status(
+                    &mut rgba_buf,
+                    &renderer::RenderConfig {
+                        display_width: cur_w,
+                        display_height: cur_h.saturating_sub(renderer::STATUS_BAR_HEIGHT),
+                        frame_width: cur_w,
+                        frame_height: cur_h,
                         tiles: 1,
-                        sim_nx: snap.im,
+                        sim_nx: pb.im,
                         particle_radius: 0,
                         display_x_offset: 0,
-                    }, &status);
+                    },
+                    &status,
+                );
 
-                    let w = cfg.frame_width;
-                    let h = cfg.frame_height;
-                    framebuf.resize(w * h, 0);
-                    rgba_to_argb(&rgba_buf, &mut framebuf);
-                    window.update_with_buffer(&framebuf, w, h).unwrap();
-                }
-                Projection::Orthographic => {
-                    let cfg = SphericalRenderConfig::orthographic(cur_w, cur_h);
-                    render_orthographic(
-                        &mut rgba_buf, &snap, gauss, &cfg, colormap, cam_lat, cam_lon,
-                    );
+                let w = lp_cfg.frame_width;
+                let h = lp_cfg.frame_height;
+                framebuf.resize(w * h, 0);
+                rgba_to_argb(&rgba_buf, &mut framebuf);
+                window.update_with_buffer(&framebuf, w, h).unwrap();
+            } else {
+                // --- 2D spherical rendering (unchanged) ---
+                let snap = pb.snapshot();
+                let gauss = pb.gauss_nodes();
 
-                    // Particle overlay
-                    if let Some(ref ps) = pb.particles {
-                        if ps.enabled {
-                            render_particles_ortho(&mut rgba_buf, ps, &cfg, cam_lat, cam_lon);
+                match projection {
+                    Projection::Equirectangular => {
+                        let cfg = SphericalRenderConfig::equirectangular(cur_w, cur_h);
+                        render_equirectangular(&mut rgba_buf, &snap, gauss, &cfg, colormap);
+
+                        // Particle overlay
+                        if let Some(ref ps) = pb.particles {
+                            if ps.enabled {
+                                render_particles_equirect(&mut rgba_buf, ps, &cfg);
+                            }
                         }
+
+                        // Field badge
+                        render_field_badge(
+                            &mut rgba_buf, &cfg,
+                            &snap.field_name, snap.field_index, snap.field_names.len(),
+                        );
+
+                        // Status bar
+                        let particle_status = if pb.has_particles() {
+                            if pb.particles_enabled() { " [T:particles]" } else { " [T:off]" }
+                        } else { "" };
+                        let status = format!(
+                            "frame {}/{} t={:.3} x{:.1} {}{}",
+                            pb.current_frame,
+                            pb.frame_count(),
+                            snap.time,
+                            pb.speed,
+                            if pb.playing { ">" } else { "||" },
+                            particle_status,
+                        );
+                        renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
+                            display_width: cfg.display_width,
+                            display_height: cfg.display_height,
+                            frame_width: cfg.frame_width,
+                            frame_height: cfg.frame_height,
+                            tiles: 1,
+                            sim_nx: snap.im,
+                            particle_radius: 0,
+                            display_x_offset: 0,
+                        }, &status);
+
+                        let w = cfg.frame_width;
+                        let h = cfg.frame_height;
+                        framebuf.resize(w * h, 0);
+                        rgba_to_argb(&rgba_buf, &mut framebuf);
+                        window.update_with_buffer(&framebuf, w, h).unwrap();
                     }
+                    Projection::Orthographic => {
+                        let cfg = SphericalRenderConfig::orthographic(cur_w, cur_h);
+                        render_orthographic(
+                            &mut rgba_buf, &snap, gauss, &cfg, colormap, cam_lat, cam_lon,
+                        );
 
-                    // Field badge
-                    render_field_badge(
-                        &mut rgba_buf, &cfg,
-                        &snap.field_name, snap.field_index, snap.field_names.len(),
-                    );
+                        // Particle overlay
+                        if let Some(ref ps) = pb.particles {
+                            if ps.enabled {
+                                render_particles_ortho(&mut rgba_buf, ps, &cfg, cam_lat, cam_lon);
+                            }
+                        }
 
-                    let particle_status = if pb.has_particles() {
-                        if pb.particles_enabled() { " [T:particles]" } else { " [T:off]" }
-                    } else { "" };
-                    let status = format!(
-                        "frame {}/{} t={:.3} x{:.1} {} lat={:.0} lon={:.0}{}",
-                        pb.current_frame,
-                        pb.frame_count(),
-                        snap.time,
-                        pb.speed,
-                        if pb.playing { ">" } else { "||" },
-                        cam_lat.to_degrees(),
-                        cam_lon.to_degrees(),
-                        particle_status,
-                    );
-                    renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
-                        display_width: cfg.display_width,
-                        display_height: cfg.display_height,
-                        frame_width: cfg.frame_width,
-                        frame_height: cfg.frame_height,
-                        tiles: 1,
-                        sim_nx: snap.im,
-                        particle_radius: 0,
-                        display_x_offset: 0,
-                    }, &status);
+                        // Field badge
+                        render_field_badge(
+                            &mut rgba_buf, &cfg,
+                            &snap.field_name, snap.field_index, snap.field_names.len(),
+                        );
 
-                    let w = cfg.frame_width;
-                    let h = cfg.frame_height;
-                    framebuf.resize(w * h, 0);
-                    rgba_to_argb(&rgba_buf, &mut framebuf);
-                    window.update_with_buffer(&framebuf, w, h).unwrap();
+                        let particle_status = if pb.has_particles() {
+                            if pb.particles_enabled() { " [T:particles]" } else { " [T:off]" }
+                        } else { "" };
+                        let status = format!(
+                            "frame {}/{} t={:.3} x{:.1} {} lat={:.0} lon={:.0}{}",
+                            pb.current_frame,
+                            pb.frame_count(),
+                            snap.time,
+                            pb.speed,
+                            if pb.playing { ">" } else { "||" },
+                            cam_lat.to_degrees(),
+                            cam_lon.to_degrees(),
+                            particle_status,
+                        );
+                        renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
+                            display_width: cfg.display_width,
+                            display_height: cfg.display_height,
+                            frame_width: cfg.frame_width,
+                            frame_height: cfg.frame_height,
+                            tiles: 1,
+                            sim_nx: snap.im,
+                            particle_radius: 0,
+                            display_x_offset: 0,
+                        }, &status);
+
+                        let w = cfg.frame_width;
+                        let h = cfg.frame_height;
+                        framebuf.resize(w * h, 0);
+                        rgba_to_argb(&rgba_buf, &mut framebuf);
+                        window.update_with_buffer(&framebuf, w, h).unwrap();
+                    }
                 }
             }
 
             needs_redraw = false;
         } else {
             // Still need to call update to process events
-            let (_w, _h) = (framebuf.len().max(1), 1);
-            // Use current framebuf size
             let total = cur_w * cur_h;
             if framebuf.len() == total {
                 window.update_with_buffer(&framebuf, cur_w, cur_h).unwrap();
@@ -1355,11 +1497,18 @@ fn run_gui_playback(dir: &str) {
             display_fps = frame_count;
             frame_count = 0;
             last_fps_time = now;
-            let proj_label = projection.label();
-            window.set_title(&format!(
-                "fludarium \u{2223} {} \u{00b7} {} \u{00b7} {} fps",
-                pb.model_name, proj_label, display_fps
-            ));
+            if is_1d {
+                window.set_title(&format!(
+                    "fludarium \u{2223} {} \u{00b7} 1D \u{00b7} {} fps",
+                    pb.model_name, display_fps
+                ));
+            } else {
+                let proj_label = projection.label();
+                window.set_title(&format!(
+                    "fludarium \u{2223} {} \u{00b7} {} \u{00b7} {} fps",
+                    pb.model_name, proj_label, display_fps
+                ));
+            }
         }
     }
 }

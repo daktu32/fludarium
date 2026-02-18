@@ -55,6 +55,16 @@ pub struct Manifest {
     pub frames: Vec<FrameEntry>,
 }
 
+impl Manifest {
+    /// Domain length for 1D periodic data (from params.length, fallback to im).
+    pub fn domain_length(&self) -> f64 {
+        self.params
+            .get("length")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(self.grid.im as f64)
+    }
+}
+
 pub struct SpgReader {
     dir: PathBuf,
     pub manifest: Manifest,

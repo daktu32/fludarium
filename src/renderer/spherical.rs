@@ -253,24 +253,13 @@ fn blend_line(buf: &mut [u8], off: usize, gray: f64, alpha: f64) {
 
 /// Draw text with dark shadow for readability over variable backgrounds.
 fn draw_text_shadow(buf: &mut [u8], fw: usize, x: usize, y: usize, text: &str, color: [u8; 3]) {
-    font::draw_text(buf, fw, x + 1, y + 1, text, [0, 0, 0]);
-    font::draw_text(buf, fw, x, y, text, color);
-}
-
-/// Draw sized text with dark shadow for readability.
-fn draw_text_shadow_sized(buf: &mut [u8], fw: usize, x: usize, y: usize, text: &str, color: [u8; 3], cw: usize, ch: usize) {
-    font::draw_text_sized(buf, fw, x + 1, y + 1, text, [0, 0, 0], cw, ch);
-    font::draw_text_sized(buf, fw, x, y, text, color, cw, ch);
+    font::draw_text_shadow(buf, fw, x, y, text, color);
 }
 
 /// Render a field-name badge at the top-left of the display area.
 ///
-/// Layout:
-/// ```text
-///   ┌────────────────────────┐
-///   │  vort anomaly     1/6  │
-///   └────────────────────────┘
-/// ```
+/// Delegates to `font::render_field_badge` with the display name resolved
+/// from the raw field name.
 pub fn render_field_badge(
     buf: &mut [u8],
     cfg: &SphericalRenderConfig,
@@ -278,67 +267,8 @@ pub fn render_field_badge(
     field_index: usize,
     field_count: usize,
 ) {
-    let fw = cfg.frame_width;
     let display_name = field_display_name(field_name);
-
-    // Badge font sizes
-    let big_cw: usize = 8;
-    let big_ch: usize = 11;
-    let big_step = big_cw + big_cw / 5 + 1; // matches draw_text_sized spacing
-    let small_step = font::FONT_WIDTH + 1;
-
-    // Index text: "1/6"
-    let index_text = format!("{}/{}", field_index + 1, field_count);
-
-    // Compute badge dimensions
-    let name_w = display_name.len() * big_step;
-    let idx_w = index_text.len() * small_step;
-    let gap = big_step; // gap between name and index
-    let pad_x: usize = 8;
-    let pad_y: usize = 5;
-
-    let content_w = name_w + gap + idx_w;
-    let badge_w = pad_x * 2 + content_w;
-    let badge_h = pad_y * 2 + big_ch;
-
-    let margin: usize = 10;
-    let badge_x = margin;
-    let badge_y = margin;
-
-    // Draw semi-transparent dark background (70% alpha blend)
-    let bg_r = 10.0_f64;
-    let bg_g = 12.0;
-    let bg_b = 20.0;
-    let alpha = 0.7;
-
-    for y in badge_y..badge_y + badge_h {
-        for x in badge_x..badge_x + badge_w {
-            if x >= fw || y >= cfg.display_height {
-                continue;
-            }
-            let off = (y * fw + x) * 4;
-            if off + 3 < buf.len() {
-                let r = buf[off] as f64;
-                let g = buf[off + 1] as f64;
-                let b = buf[off + 2] as f64;
-                buf[off] = (r * (1.0 - alpha) + bg_r * alpha) as u8;
-                buf[off + 1] = (g * (1.0 - alpha) + bg_g * alpha) as u8;
-                buf[off + 2] = (b * (1.0 - alpha) + bg_b * alpha) as u8;
-            }
-        }
-    }
-
-    // Draw field display name (8x11 sized font with shadow)
-    let text_x = badge_x + pad_x;
-    let text_y = badge_y + pad_y;
-    let name_color = [0xCC, 0xCC, 0xD0];
-    draw_text_shadow_sized(buf, fw, text_x, text_y, display_name, name_color, big_cw, big_ch);
-
-    // Draw index "1/6" (5x7 normal font, dimmer)
-    let idx_x = text_x + name_w + gap;
-    let idx_y = text_y + (big_ch.saturating_sub(font::FONT_HEIGHT)) / 2; // vertically center
-    let idx_color = [0x55, 0x55, 0x55];
-    font::draw_text(buf, fw, idx_x, idx_y, &index_text, idx_color);
+    font::render_field_badge(buf, cfg.frame_width, cfg.display_height, display_name, field_index, field_count);
 }
 
 /// Draw graticule (lat/lon grid lines + labels) on equirectangular projection.
