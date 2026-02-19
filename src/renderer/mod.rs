@@ -1,5 +1,6 @@
 mod color;
 mod font;
+pub mod heatmap;
 pub mod lineplot;
 pub mod spherical;
 

@@ -4,6 +4,127 @@ use crate::spherical::{SphericalParticleSystem, SphericalSnapshot, PARTICLE_COUN
 use crate::spgrid::{SpgFrame, SpgReader};
 use gtool_rs::reader::GtoolReader;
 
+// --- Channel particle system ---
+
+const CHANNEL_PARTICLE_COUNT: usize = 500;
+const CHANNEL_TRAIL_LEN: usize = 32;
+const CHANNEL_SUBSTEPS: usize = 4;
+
+pub struct ChannelParticles {
+    pub x: Vec<f64>,
+    pub z: Vec<f64>,
+    pub enabled: bool,
+    trail_x: Vec<Vec<f64>>,
+    trail_z: Vec<Vec<f64>>,
+    trail_cursor: usize,
+    trail_count: usize,
+}
+
+impl ChannelParticles {
+    pub fn new(count: usize, lx: f64, lz: f64) -> Self {
+        let mut x = Vec::with_capacity(count);
+        let mut z = Vec::with_capacity(count);
+        let mut rng: u64 = 0xDEAD_BEEF_CAFE;
+        for _ in 0..count {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let rx = (rng >> 33) as f64 / (1u64 << 31) as f64;
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let rz = (rng >> 33) as f64 / (1u64 << 31) as f64;
+            x.push(rx * lx);
+            z.push(rz * lz * 0.96 + lz * 0.02);
+        }
+        let trail_x = vec![vec![0.0; count]; CHANNEL_TRAIL_LEN];
+        let trail_z = vec![vec![0.0; count]; CHANNEL_TRAIL_LEN];
+        Self { x, z, enabled: true, trail_x, trail_z, trail_cursor: 0, trail_count: 0 }
+    }
+
+    fn push_trail(&mut self) {
+        let slot = self.trail_cursor % CHANNEL_TRAIL_LEN;
+        for i in 0..self.x.len() {
+            self.trail_x[slot][i] = self.x[i];
+            self.trail_z[slot][i] = self.z[i];
+        }
+        self.trail_cursor += 1;
+        if self.trail_count < CHANNEL_TRAIL_LEN {
+            self.trail_count += 1;
+        }
+    }
+
+    pub fn ordered_trails(&self) -> Vec<(&[f64], &[f64])> {
+        let n = self.trail_count;
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let idx = (self.trail_cursor + CHANNEL_TRAIL_LEN - n + k) % CHANNEL_TRAIL_LEN;
+            out.push((self.trail_x[idx].as_slice(), self.trail_z[idx].as_slice()));
+        }
+        out
+    }
+
+    /// Advect particles using stream function psi with sub-stepping.
+    /// u = dψ/dz (horizontal), w = -dψ/dx (vertical).
+    /// Pushes a trail entry at each sub-step for smooth trails.
+    pub fn advect(&mut self, psi: &[f64], nx: usize, nz: usize, lx: f64, lz: f64, dt: f64) {
+        let dx = lx / nx as f64;
+        let dz = lz / (nz + 1) as f64;
+        let eps_x = dx * 0.5;
+        let eps_z = dz * 0.5;
+        let sub_dt = dt / CHANNEL_SUBSTEPS as f64;
+        let wall_eps = lz * 0.001;
+
+        for _ in 0..CHANNEL_SUBSTEPS {
+            self.push_trail();
+
+            for i in 0..self.x.len() {
+                let px = self.x[i];
+                let pz = self.z[i];
+
+                // u = ∂ψ/∂z
+                let psi_up = interp_psi(psi, nx, nz, lx, lz, px, pz + eps_z);
+                let psi_dn = interp_psi(psi, nx, nz, lx, lz, px, pz - eps_z);
+                let u = (psi_up - psi_dn) / (2.0 * eps_z);
+
+                // w = -∂ψ/∂x
+                let psi_rt = interp_psi(psi, nx, nz, lx, lz, (px + eps_x).rem_euclid(lx), pz);
+                let psi_lt = interp_psi(psi, nx, nz, lx, lz, (px - eps_x).rem_euclid(lx), pz);
+                let w = -(psi_rt - psi_lt) / (2.0 * eps_x);
+
+                self.x[i] = (px + u * sub_dt).rem_euclid(lx);
+                self.z[i] = (pz + w * sub_dt).clamp(wall_eps, lz - wall_eps);
+            }
+        }
+    }
+}
+
+/// Bilinear interpolation of psi on the channel grid.
+/// Grid: psi[j * nx + i], z_j = (j+1)*lz/(nz+1), x_i = i*lx/nx (periodic).
+/// Boundary: psi = 0 at z=0 and z=lz.
+fn interp_psi(psi: &[f64], nx: usize, nz: usize, lx: f64, lz: f64, px: f64, pz: f64) -> f64 {
+    let dx = lx / nx as f64;
+    let dz = lz / (nz + 1) as f64;
+
+    // x: periodic
+    let fx = px / dx;
+    let ix0f = fx.floor();
+    let ix0 = ((ix0f as isize) % nx as isize + nx as isize) as usize % nx;
+    let ix1 = (ix0 + 1) % nx;
+    let sx = fx - ix0f;
+
+    // z: interior points at z_j = (j+1)*dz, so j = pz/dz - 1
+    let fz = pz / dz - 1.0;
+    let jz0 = fz.floor() as isize;
+    let jz1 = jz0 + 1;
+    let sz = fz - jz0 as f64;
+
+    let val = |j: isize, i: usize| -> f64 {
+        if j < 0 || j >= nz as isize { 0.0 } else { psi[j as usize * nx + i] }
+    };
+
+    val(jz0, ix0) * (1.0 - sx) * (1.0 - sz)
+        + val(jz0, ix1) * sx * (1.0 - sz)
+        + val(jz1, ix0) * (1.0 - sx) * sz
+        + val(jz1, ix1) * sx * sz
+}
+
 pub struct PlaybackState {
     frames: Vec<SpgFrame>,
     gauss_nodes: Vec<f64>,
@@ -30,6 +151,14 @@ pub struct PlaybackState {
     output_interval: u64,
     /// Domain length for 1D periodic data.
     domain_length: f64,
+    /// True if this is a channel grid (2D rectangular, not spherical).
+    is_channel: bool,
+    /// Channel domain (lx, lz) if this is a channel grid.
+    channel_domain: (f64, f64),
+    /// Index of "psi" field (for channel particle advection).
+    psi_index: Option<usize>,
+    /// Channel particle system (only for channel grids with psi field).
+    pub channel_particles: Option<ChannelParticles>,
 }
 
 impl PlaybackState {
@@ -120,6 +249,10 @@ impl PlaybackState {
             model_dt,
             output_interval,
             domain_length,
+            is_channel: false,
+            channel_domain: (0.0, 0.0),
+            psi_index: None,
+            channel_particles: None,
         })
     }
 
@@ -130,9 +263,11 @@ impl PlaybackState {
         let im = info.grid.im;
         let jm = info.grid.jm;
         let is_1d = jm == 1;
+        let is_channel = info.grid.grid_type == gtool_rs::GridType::Channel;
+        let channel_domain = reader.channel_domain().unwrap_or((0.0, 0.0));
 
-        // Read gauss nodes directly from the NetCDF file (no computation needed)
-        let gauss_nodes = if is_1d {
+        // Read gauss nodes directly from the NetCDF file (skip for 1D and channel)
+        let gauss_nodes = if is_1d || is_channel {
             Vec::new()
         } else {
             reader
@@ -197,6 +332,21 @@ impl PlaybackState {
         let output_interval = info.time.output_interval;
         let domain_length = reader.domain_length().unwrap_or(0.0);
 
+        let psi_index = if is_channel {
+            field_names.iter().position(|n| n == "psi")
+        } else {
+            None
+        };
+        let channel_particles = if is_channel && psi_index.is_some() {
+            Some(ChannelParticles::new(
+                CHANNEL_PARTICLE_COUNT,
+                channel_domain.0,
+                channel_domain.1,
+            ))
+        } else {
+            None
+        };
+
         Ok(Self {
             frames: spg_frames,
             gauss_nodes,
@@ -216,6 +366,10 @@ impl PlaybackState {
             model_dt,
             output_interval,
             domain_length,
+            is_channel,
+            channel_domain,
+            psi_index,
+            channel_particles,
         })
     }
 
@@ -242,6 +396,7 @@ impl PlaybackState {
             }
             if self.current_frame != prev_frame {
                 self.advect_particles();
+                self.advect_channel_particles();
             }
         }
     }
@@ -266,6 +421,22 @@ impl PlaybackState {
         ps.advect(cu_data, cv_data, self.im, self.jm, &self.gauss_nodes, sim_dt);
     }
 
+    fn advect_channel_particles(&mut self) {
+        let Some(pi) = self.psi_index else { return };
+        let Some(ref mut cp) = self.channel_particles else { return };
+
+        let frame = &self.frames[self.current_frame];
+        if pi >= frame.fields.len() {
+            return;
+        }
+
+        let psi_data = &frame.fields[pi].1;
+        let (lx, lz) = self.channel_domain;
+        let sim_dt = self.model_dt * self.output_interval as f64;
+
+        cp.advect(psi_data, self.im, self.jm, lx, lz, sim_dt);
+    }
+
     pub fn toggle_play(&mut self) {
         self.playing = !self.playing;
     }
@@ -274,20 +445,25 @@ impl PlaybackState {
         if let Some(ref mut ps) = self.particles {
             ps.enabled = !ps.enabled;
         }
+        if let Some(ref mut cp) = self.channel_particles {
+            cp.enabled = !cp.enabled;
+        }
     }
 
     pub fn has_particles(&self) -> bool {
-        self.particles.is_some()
+        self.particles.is_some() || self.channel_particles.is_some()
     }
 
     pub fn particles_enabled(&self) -> bool {
         self.particles.as_ref().map_or(false, |ps| ps.enabled)
+            || self.channel_particles.as_ref().map_or(false, |cp| cp.enabled)
     }
 
     pub fn step_forward(&mut self) {
         if self.current_frame + 1 < self.frames.len() {
             self.current_frame += 1;
             self.advect_particles();
+            self.advect_channel_particles();
         }
     }
 
@@ -314,6 +490,16 @@ impl PlaybackState {
     /// True if this is 1D data (jm == 1).
     pub fn is_1d(&self) -> bool {
         self.jm == 1
+    }
+
+    /// True if this is a 2D channel grid (not spherical).
+    pub fn is_channel(&self) -> bool {
+        self.is_channel
+    }
+
+    /// Channel domain (lx, lz).
+    pub fn channel_domain(&self) -> (f64, f64) {
+        self.channel_domain
     }
 
     /// Domain length for 1D periodic data.

@@ -1147,6 +1147,7 @@ fn run_gui_playback(dir: &str) {
         render_particles_equirect, render_particles_ortho, render_field_badge,
     };
     use renderer::lineplot::{LinePlotConfig, render_lineplot};
+    use renderer::heatmap::{HeatmapConfig, render_heatmap, render_channel_particles};
 
     eprintln!("Loading {dir}...");
 
@@ -1184,8 +1185,11 @@ fn run_gui_playback(dir: &str) {
     eprintln!("  {} frames loaded.", pb.frame_count());
 
     let is_1d = pb.is_1d();
+    let is_channel = pb.is_channel();
     if is_1d {
         eprintln!("  1D mode (jm=1), using line plot renderer.");
+    } else if is_channel {
+        eprintln!("  Channel mode ({}x{}), using heatmap renderer.", pb.im, pb.jm);
     }
 
     let win_width = Defaults::WIN_WIDTH;
@@ -1199,6 +1203,8 @@ fn run_gui_playback(dir: &str) {
 
     let title = if is_1d {
         format!("fludarium \u{2223} {} \u{00b7} 1D", pb.model_name)
+    } else if is_channel {
+        format!("fludarium \u{2223} {} \u{00b7} Channel", pb.model_name)
     } else {
         format!(
             "fludarium \u{2223} {} \u{00b7} {}",
@@ -1286,13 +1292,13 @@ fn run_gui_playback(dir: &str) {
             }
         }
         if window.is_key_pressed(Key::Up, KeyRepeat::Yes) {
-            if !is_1d && projection == Projection::Orthographic {
+            if !is_1d && !is_channel && projection == Projection::Orthographic {
                 cam_lat = (cam_lat + 5.0_f64.to_radians()).min(std::f64::consts::FRAC_PI_2);
                 needs_redraw = true;
             }
         }
         if window.is_key_pressed(Key::Down, KeyRepeat::Yes) {
-            if !is_1d && projection == Projection::Orthographic {
+            if !is_1d && !is_channel && projection == Projection::Orthographic {
                 cam_lat = (cam_lat - 5.0_f64.to_radians()).max(-std::f64::consts::FRAC_PI_2);
                 needs_redraw = true;
             }
@@ -1312,7 +1318,7 @@ fn run_gui_playback(dir: &str) {
             needs_redraw = true;
         }
 
-        if !is_1d && window.is_key_pressed(Key::P, KeyRepeat::No) {
+        if !is_1d && !is_channel && window.is_key_pressed(Key::P, KeyRepeat::No) {
             projection = projection.toggle();
             needs_redraw = true;
         }
@@ -1386,6 +1392,76 @@ fn run_gui_playback(dir: &str) {
 
                 let w = lp_cfg.frame_width;
                 let h = lp_cfg.frame_height;
+                framebuf.resize(w * h, 0);
+                rgba_to_argb(&rgba_buf, &mut framebuf);
+                window.update_with_buffer(&framebuf, w, h).unwrap();
+            } else if is_channel {
+                // --- 2D channel heatmap rendering ---
+                let hm_cfg = HeatmapConfig::new(cur_w, cur_h);
+                let data = pb.field_data();
+                let value_range = pb.current_global_range();
+                let field_name = pb.current_field_name().to_string();
+                let field_count = pb.field_names.len();
+                let field_index = pb.field_index;
+
+                render_heatmap(
+                    &mut rgba_buf,
+                    &hm_cfg,
+                    data,
+                    pb.im,
+                    pb.jm,
+                    pb.channel_domain(),
+                    value_range,
+                    &field_name,
+                    field_index,
+                    field_count,
+                    colormap,
+                );
+
+                // Channel particles overlay
+                if let Some(ref cp) = pb.channel_particles {
+                    if cp.enabled {
+                        let (lx, lz) = pb.channel_domain();
+                        let trails = cp.ordered_trails();
+                        render_channel_particles(
+                            &mut rgba_buf,
+                            &hm_cfg,
+                            &cp.x,
+                            &cp.z,
+                            &trails,
+                            lx,
+                            lz,
+                        );
+                    }
+                }
+
+                // Status bar
+                let status = format!(
+                    "frame {}/{} step={} t={:.6} x{:.1} {}",
+                    pb.current_frame + 1,
+                    pb.frame_count(),
+                    pb.current_step(),
+                    pb.current_time(),
+                    pb.speed,
+                    if pb.playing { ">" } else { "||" },
+                );
+                renderer::render_status(
+                    &mut rgba_buf,
+                    &renderer::RenderConfig {
+                        display_width: cur_w,
+                        display_height: cur_h.saturating_sub(renderer::STATUS_BAR_HEIGHT),
+                        frame_width: cur_w,
+                        frame_height: cur_h,
+                        tiles: 1,
+                        sim_nx: pb.im,
+                        particle_radius: 0,
+                        display_x_offset: 0,
+                    },
+                    &status,
+                );
+
+                let w = hm_cfg.frame_width;
+                let h = hm_cfg.frame_height;
                 framebuf.resize(w * h, 0);
                 rgba_to_argb(&rgba_buf, &mut framebuf);
                 window.update_with_buffer(&framebuf, w, h).unwrap();
@@ -1514,6 +1590,11 @@ fn run_gui_playback(dir: &str) {
             if is_1d {
                 window.set_title(&format!(
                     "fludarium \u{2223} {} \u{00b7} 1D \u{00b7} {} fps",
+                    pb.model_name, display_fps
+                ));
+            } else if is_channel {
+                window.set_title(&format!(
+                    "fludarium \u{2223} {} \u{00b7} Channel \u{00b7} {} fps",
                     pb.model_name, display_fps
                 ));
             } else {
