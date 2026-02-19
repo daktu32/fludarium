@@ -2,7 +2,7 @@
 
 ## Current Status: Quad-Model Fluid Simulator
 
-181 tests passing. Codebase modularized into directory-based modules: `solver/` (9 files), `renderer/` (3 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Four simulation models (Rayleigh-Bénard convection + Kármán vortex street + Kelvin-Helmholtz instability + Lid-Driven Cavity). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. Per-model colormaps: TokyoNight (RB), SolarWind (Kármán), OceanLava (KH), ArcticIce (Cavity). No external config files — all defaults in code.
+217 tests passing. Codebase modularized into directory-based modules: `solver/` (9 files), `renderer/` (4 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Four simulation models (Rayleigh-Bénard convection + Kármán vortex street + Kelvin-Helmholtz instability + Lid-Driven Cavity). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. Per-model colormaps: TokyoNight (RB), SolarWind (Kármán), OceanLava (KH), ArcticIce (Cavity). Playback supports three grid types: spherical (equirectangular/orthographic), 1D periodic (line plot), and 2D channel (heatmap). No external config files — all defaults in code.
 
 ## Completed
 
@@ -284,9 +284,26 @@
 - **全機能対応**: global_ranges、粒子移流、HUD、グラティキュール全て .nc でも動作
 - **2D/1D 自動判別**: Gaussian grid は球面再生、Periodic は 1D line plot
 
+### 2D チャンネルヒートマップ再生
+- **`renderer/heatmap.rs` (新規)**: 2D ヒートマップレンダラー
+  - バイリニア補間でシミュレーション格子を画面解像度に拡大
+  - 等値線 (16本) を modular arithmetic で1パスオーバーレイ
+  - 軸フレーム + Z軸/X軸ラベル (物理座標値5目盛)
+  - カラーバー + ティック値 + フィールドバッジ
+  - 流星スタイル粒子トレイル描画 (Bresenham line + 5×5 soft glow)
+- **`ChannelParticles`**: 流線関数 ψ ベースの粒子移流
+  - `u = ∂ψ/∂z`, `w = -∂ψ/∂x` の中心差分で速度復元
+  - 4サブステップ移流 + 32フレームリングバッファトレイル
+  - X 周期境界、Z 壁反射
+- **`PlaybackState` 拡張**: gtool-rs `GridType::Channel` 自動検出、domain (lx, lz) 読み込み、psi フィールド検索
+- **GUI 統合**: ヒートマップ描画パス、チャンネル用キー制御 (正射影/P キー無効化)、Channel タイトルバー
+- **3グリッドタイプ対応**: 球面 (Gaussian) → 等距円筒/正射影、1D (Periodic) → 折れ線、2D (Channel) → ヒートマップ
+- 3 新テスト (heatmap config, buffer size, colored pixels)
+
 ## Test Summary
-- **214 tests, all passing** (1 ignored: diagnostic)
+- **217 tests, all passing** (1 ignored: diagnostic)
 - 球面関連: graticule 4 tests, spherical interpolation/particle 7 tests, lineplot 3 tests
+- heatmap: config/buffer/render 3 tests
 - playback: gauss_nodes 4 tests
 - font: glyph/draw_text/status 5 tests
 
