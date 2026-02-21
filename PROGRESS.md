@@ -1,8 +1,8 @@
 # fludarium Progress
 
-## Current Status: Quad-Model Fluid Simulator
+## Current Status: Penta-Model Fluid Simulator
 
-238 tests passing. Codebase modularized into directory-based modules: `solver/` (10 files), `renderer/` (4 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Four simulation models (Rayleigh-Bénard convection + Kármán vortex street + Kelvin-Helmholtz instability + Lid-Driven Cavity) + RB benchmark mode (`--ra`/`--pr` CLI). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. Per-model colormaps: TokyoNight (RB), SolarWind (Kármán), OceanLava (KH), ArcticIce (Cavity). Playback supports three grid types: spherical (equirectangular/orthographic), 1D periodic (line plot), and 2D channel (heatmap). No external config files — all defaults in code.
+250 tests passing. Codebase modularized into directory-based modules: `solver/` (11 files), `renderer/` (4 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Five simulation models (Rayleigh-Bénard convection + Kármán vortex street + Kelvin-Helmholtz instability + Lid-Driven Cavity + Kolmogorov flow) + RB benchmark mode (`--ra`/`--pr` CLI). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. Per-model colormaps: TokyoNight (RB), SolarWind (Kármán), OceanLava (KH), ArcticIce (Cavity), NeonVortex (Kolmogorov). Playback supports three grid types: spherical (equirectangular/orthographic), 1D periodic (line plot), and 2D channel (heatmap). No external config files — all defaults in code.
 
 ## Completed
 
@@ -14,7 +14,7 @@
 - `SimState` struct with all grid fields + Xor128 PRNG
 - `idx(x, y, nx)` with mod wrap-around, variable grid width
 - `FrameSnapshot` for decoupling simulation state from rendering (includes velocity, trails, cylinder geometry)
-- `FluidModel` enum: `RayleighBenard` / `KarmanVortex`
+- `FluidModel` enum: `RayleighBenard` / `KarmanVortex` / `KelvinHelmholtz` / `LidDrivenCavity` / `Kolmogorov`
 - Initial conditions: Gaussian hot spot at bottom center (RB), uniform inflow + cylinder obstacle (Kármán)
 - Particle trail ring buffer (`TRAIL_LEN=8`) for trajectory visualization
 - Fractional cylinder mask with smooth anti-aliased edges
@@ -182,7 +182,7 @@
 - Multi-agent parallel refactoring (3 rust-architect agents working simultaneously)
 
 ### Sub-issue 12: Kelvin-Helmholtz Instability Model
-- **`FluidModel::KelvinHelmholtz`** — third simulation model: shear-driven interface instability
+- **`FluidModel::KelvinHelmholtz`** — third simulation model: shear-driven interface instability (see Sub-issue 12 below)
 - **Physics**: tanh shear profile (`vx = U·tanh((y-N/2)/δ)`), sinusoidal vy perturbation (k=2,4), passive dye tracer
 - **Boundary conditions**: X-periodic + Y free-slip (Neumann for vx, reflection for vy)
 - **`solver/kh.rs` (new)**: `reinject_shear()` (wall-only relaxation toward target shear profile, 6 rows from each wall with fade)
@@ -198,8 +198,24 @@
 - **9 QA tests + 3 unit tests**: initial conditions, shear profile, boundary conditions, dye interface, perturbation, fluid step stability, param consistency
 - Multi-agent team development: physics-theorist (model design) + rust-architect (code architecture) + qa-agent (quality assurance)
 
+### Sub-issue 14: Kolmogorov Flow Model
+- **`FluidModel::Kolmogorov`** — fifth simulation model: sinusoidal body force-driven doubly-periodic flow
+- **Physics**: Sinusoidal body force `F_x = A·sin(2π·k·y/N)` drives flow, transition from laminar → meandering → vortex streets → chaos with increasing amplitude
+- **Doubly-periodic boundaries**: First model with Y-periodic ghost cells (`row 0 = row N-2`, `row N-1 = row 1`), both X and Y wrap — no walls, no obstacles
+- **`solver/kolmogorov.rs` (new)**: `inject_body_force()` — sinusoidal force profile applied each timestep
+- **`BoundaryConfig::Kolmogorov`**: New boundary variant with `periodic_y()` method (only true for Kolmogorov)
+- **`advect()` enhancement**: Y mod-wrap instead of clamp when `periodic_y()` is true; iterates all rows (0..N) for doubly-periodic domains
+- **`advect_particles_kolmogorov()`**: X/Y both wrap via modular arithmetic
+- **`fluid_step_kolmogorov()`**: force injection → diffuse → project → advect → project → vorticity confinement → dye diffuse/advect → clamp → particle advect
+- **`SolverParams::default_kolmogorov()`**: visc=0.005, diff=0.0005, dt=0.05, force_amplitude=0.08, force_wavenumber=4.0
+- **`SimState::new_kolmogorov()`**: sinusoidal initial velocity + horizontal dye bands + random particles
+- **NeonVortex colormap**: dark void → teal → emerald → lime → neon gold — designed for mixing patterns
+- **Overlay**: 6 adjustable parameters (visc, diff, dt, amplitude, wavenumber, confinement)
+- **5-model cycle**: M key cycles RB → Kármán → KH → Cavity → Kolmogorov → RB
+- **12 new tests**: boundary (3), core advect (1), kolmogorov force (2), particle (1), state (4), params (1)
+
 ### Per-Model Colormaps & Vorticity Visualization
-- **`ColorMap` enum**: `TokyoNight` (RB), `OceanLava` (KH), `SolarWind` (Kármán), `ArcticIce` (Cavity) — model-specific palettes
+- **`ColorMap` enum**: `TokyoNight` (RB), `OceanLava` (KH), `SolarWind` (Kármán), `ArcticIce` (Cavity), `NeonVortex` (Kolmogorov) — model-specific palettes
 - **Ocean & Lava**: deep blue → medium blue → white interface → orange → deep red — designed for KH 2-fluid mixing
 - **Solar Wind**: deep space → indigo → violet → magenta → plasma gold — cosmic theme for Kármán dye wake
 - **`map_to_rgba(t, colormap)`**: replaces `temperature_to_rgba()` (kept as `#[cfg(test)]` alias)
@@ -328,12 +344,13 @@
 - **結果**: 正射影で ~10fps → ~50fps に改善
 
 ## Test Summary
-- **238 tests, all passing** (1 ignored: diagnostic)
+- **250 tests, all passing** (1 ignored: diagnostic)
 - 球面関連: graticule 4 tests, spherical interpolation/particle 7 tests, lineplot 3 tests
 - heatmap: config/buffer/render 3 tests
 - playback: gauss_nodes 4 tests
 - font: glyph/draw_text/status 5 tests
 - ベンチマーク: params 3, boundary 3, thermal 2, diagnostics 6, solver 3, state 4
+- Kolmogorov: boundary 3, core advect 1, force 2, particle 1, state 4, params 1
 
 ## Next Steps
 - Tag v0.1.0 and push for GitHub Release

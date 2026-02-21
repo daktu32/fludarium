@@ -132,6 +132,40 @@ pub(super) fn advect_particles_cavity(state: &mut crate::state::SimState, dt: f6
     }
 }
 
+/// Advect particles for Kolmogorov flow.
+/// Both X and Y wrap (doubly periodic).
+pub(super) fn advect_particles_kolmogorov(state: &mut crate::state::SimState, dt: f64) {
+    let nx = state.nx;
+    let dt0 = dt * (N - 2) as f64;
+    let n_f = N as f64;
+    let nx_f = nx as f64;
+
+    for p in 0..state.particles_x.len() {
+        let px = state.particles_x[p];
+        let py = state.particles_y[p];
+
+        // Bilinear interpolation of velocity at particle position
+        let i0 = px.floor() as i32;
+        let j0 = py.floor() as i32;
+        let sx = px - px.floor();
+        let sy = py - j0 as f64;
+        let (vx_interp, vy_interp) = interpolate_velocity(&state.vx, &state.vy, i0, j0, sx, sy, nx);
+
+        // Move particle forward
+        let new_x = px + dt0 * vx_interp;
+        let new_y = py + dt0 * vy_interp;
+
+        // X: wrap around (periodic)
+        let new_x = ((new_x % nx_f) + nx_f) % nx_f;
+
+        // Y: wrap around (periodic)
+        let new_y = ((new_y % n_f) + n_f) % n_f;
+
+        state.particles_x[p] = new_x;
+        state.particles_y[p] = new_y;
+    }
+}
+
 /// Advect particles for Karman flow.
 /// Particles that exit right or enter cylinder are respawned at left.
 pub(super) fn advect_particles_karman(state: &mut crate::state::SimState, dt: f64) {
@@ -280,6 +314,25 @@ mod tests {
             let py = state.particles_y[i];
             assert!(px >= 0.0 && px < n_f, "Particle {} x out of range: {}", i, px);
             assert!(py >= 2.0 && py <= n_f - 3.0, "Particle {} y out of range: {}", i, py);
+        }
+    }
+
+    #[test]
+    fn test_advect_particles_kolmogorov_wraps_xy() {
+        let params = SolverParams::default_kolmogorov();
+        let mut state = SimState::new_kolmogorov(100, &params, N);
+        // Set strong velocity to force wrapping
+        state.vx.fill(0.5);
+        state.vy.fill(0.5);
+
+        advect_particles_kolmogorov(&mut state, 0.1);
+
+        let n_f = N as f64;
+        for i in 0..state.particles_x.len() {
+            let px = state.particles_x[i];
+            let py = state.particles_y[i];
+            assert!(px >= 0.0 && px < n_f, "Particle {} x out of range: {}", i, px);
+            assert!(py >= 0.0 && py < n_f, "Particle {} y out of range: {}", i, py);
         }
     }
 }

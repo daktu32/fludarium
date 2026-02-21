@@ -38,6 +38,7 @@ pub fn create_sim_state(
         ),
         FluidModel::KelvinHelmholtz => SimState::new_kh(num_particles, params, nx),
         FluidModel::LidDrivenCavity => SimState::new_cavity(num_particles, nx),
+        FluidModel::Kolmogorov => SimState::new_kolmogorov(num_particles, params, nx),
         FluidModel::RayleighBenard if params.benchmark_mode => SimState::new_benchmark(num_particles, nx),
         _ => SimState::new(num_particles, params.bottom_base, nx),
     }
@@ -49,6 +50,7 @@ pub struct ModelParams {
     pub karman: SolverParams,
     pub kh: SolverParams,
     pub cavity: SolverParams,
+    pub kolmogorov: SolverParams,
 }
 
 impl ModelParams {
@@ -58,6 +60,7 @@ impl ModelParams {
             karman: SolverParams::default_karman(),
             kh: SolverParams::default_kh(),
             cavity: SolverParams::default_cavity(),
+            kolmogorov: SolverParams::default_kolmogorov(),
         }
     }
 
@@ -66,6 +69,7 @@ impl ModelParams {
             FluidModel::KarmanVortex => &self.karman,
             FluidModel::KelvinHelmholtz => &self.kh,
             FluidModel::LidDrivenCavity => &self.cavity,
+            FluidModel::Kolmogorov => &self.kolmogorov,
             _ => &self.rb,
         }
     }
@@ -81,13 +85,15 @@ impl ModelParams {
             FluidModel::KarmanVortex => self.karman = current.clone(),
             FluidModel::KelvinHelmholtz => self.kh = current.clone(),
             FluidModel::LidDrivenCavity => self.cavity = current.clone(),
+            FluidModel::Kolmogorov => self.kolmogorov = current.clone(),
         }
-        // Cycle: RB -> Karman -> KH -> Cavity -> RB
+        // Cycle: RB -> Karman -> KH -> Cavity -> Kolmogorov -> RB
         let new_model = match old_model {
             FluidModel::RayleighBenard => FluidModel::KarmanVortex,
             FluidModel::KarmanVortex => FluidModel::KelvinHelmholtz,
             FluidModel::KelvinHelmholtz => FluidModel::LidDrivenCavity,
-            FluidModel::LidDrivenCavity => FluidModel::RayleighBenard,
+            FluidModel::LidDrivenCavity => FluidModel::Kolmogorov,
+            FluidModel::Kolmogorov => FluidModel::RayleighBenard,
         };
         let restored = self.get(new_model).clone();
         (new_model, restored)
@@ -148,6 +154,7 @@ pub fn spawn_physics_thread(
                     FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
                     FluidModel::KelvinHelmholtz => solver::fluid_step_kh(&mut sim, &params),
                     FluidModel::LidDrivenCavity => solver::fluid_step_cavity(&mut sim, &params),
+                    FluidModel::Kolmogorov => solver::fluid_step_kolmogorov(&mut sim, &params),
                     FluidModel::RayleighBenard if params.benchmark_mode => {
                         solver::fluid_step_benchmark(&mut sim, &params);
                     }
@@ -296,8 +303,12 @@ mod tests {
         let (cavity_model, cavity_params) = mp.save_and_switch(&restored, new_model);
         assert!(matches!(cavity_model, FluidModel::LidDrivenCavity));
         assert!((cavity_params.visc - SolverParams::default_cavity().visc).abs() < 1e-10);
-        // Switch from Cavity -> RB
-        let (rb_model, rb_params) = mp.save_and_switch(&cavity_params, cavity_model);
+        // Switch from Cavity -> Kolmogorov
+        let (kolmo_model, kolmo_params) = mp.save_and_switch(&cavity_params, cavity_model);
+        assert!(matches!(kolmo_model, FluidModel::Kolmogorov));
+        assert!((kolmo_params.visc - SolverParams::default_kolmogorov().visc).abs() < 1e-10);
+        // Switch from Kolmogorov -> RB
+        let (rb_model, rb_params) = mp.save_and_switch(&kolmo_params, kolmo_model);
         assert!(matches!(rb_model, FluidModel::RayleighBenard));
         assert!((rb_params.visc - SolverParams::default().visc).abs() < 1e-10);
         // Switch from RB -> Karman, should get our modified Karman visc back

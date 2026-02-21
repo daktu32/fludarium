@@ -4,6 +4,7 @@ mod core;
 pub mod diagnostics;
 mod karman;
 mod kh;
+mod kolmogorov;
 mod params;
 mod particle;
 mod thermal;
@@ -14,12 +15,13 @@ pub use params::SolverParams;
 pub use thermal::inject_thermal_perturbation;
 
 use crate::state::N;
-use boundary::BoundaryConfig::{KarmanVortex, KelvinHelmholtz, LidDrivenCavity, RayleighBenard, RayleighBenardBenchmark};
+use boundary::BoundaryConfig::{KarmanVortex, KelvinHelmholtz, Kolmogorov, LidDrivenCavity, RayleighBenard, RayleighBenardBenchmark};
 use cavity::compute_velocity_dye;
 use core::{advect, diffuse, project};
 use karman::{apply_mask, apply_mask_fields, damp_dye_in_cylinder, inject_dye, inject_inflow, inject_wake_perturbation, vorticity_confinement};
 use kh::reinject_shear;
-use particle::{advect_particles, advect_particles_cavity, advect_particles_karman};
+use kolmogorov::inject_body_force;
+use particle::{advect_particles, advect_particles_cavity, advect_particles_karman, advect_particles_kolmogorov};
 use thermal::{apply_buoyancy, apply_buoyancy_perturbation, inject_heat_source};
 
 /// Full fluid simulation step (Rayleigh-Benard).
@@ -257,6 +259,48 @@ pub fn fluid_step_kh(state: &mut crate::state::SimState, params: &SolverParams) 
 
     // 9. Advect particles (periodic X, reflected Y -- same as RB)
     advect_particles(state, dt);
+}
+
+/// Full fluid simulation step for Kolmogorov flow.
+/// Doubly periodic with sinusoidal body force.
+pub fn fluid_step_kolmogorov(state: &mut crate::state::SimState, params: &SolverParams) {
+    let dt = params.dt;
+    let nx = state.nx;
+    let bc = Kolmogorov;
+
+    // 1. Inject sinusoidal body force
+    inject_body_force(&mut state.vx, dt, params.force_amplitude, params.force_wavenumber, nx);
+
+    // 2. Diffuse velocity
+    diffuse(FieldType::Vx, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vy, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter, &bc, nx);
+
+    // 3. Project (divergence-free)
+    project(&mut state.vx0, &mut state.vy0, &mut state.scratch_a, &mut state.scratch_b, params.project_iter, &bc, nx);
+
+    // 4. Advect velocity
+    advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
+
+    // 5. Project again
+    project(&mut state.vx, &mut state.vy, &mut state.scratch_a, &mut state.scratch_b, params.project_iter, &bc, nx);
+
+    // 6. Vorticity confinement (if enabled)
+    if params.confinement > 0.0 {
+        karman::vorticity_confinement(state, params.confinement, dt);
+    }
+
+    // 7. Diffuse + advect dye (temperature as passive tracer)
+    diffuse(FieldType::Scalar, &mut state.scratch_a, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
+    advect(FieldType::Scalar, &mut state.temperature, &state.scratch_a, &state.vx, &state.vy, dt, &bc, nx);
+
+    // 8. Clamp dye
+    for t in state.temperature.iter_mut() {
+        *t = t.clamp(0.0, 1.0);
+    }
+
+    // 9. Advect particles (doubly periodic)
+    advect_particles_kolmogorov(state, dt);
 }
 
 /// Full fluid simulation step for Lid-Driven Cavity.

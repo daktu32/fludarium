@@ -145,6 +145,7 @@ fn model_label(model: state::FluidModel) -> &'static str {
         state::FluidModel::KarmanVortex => "K\u{00e1}rm\u{00e1}n Vortex",
         state::FluidModel::KelvinHelmholtz => "Kelvin\u{2013}Helmholtz",
         state::FluidModel::LidDrivenCavity => "Lid-Driven Cavity",
+        state::FluidModel::Kolmogorov => "Kolmogorov Flow",
     }
 }
 
@@ -188,6 +189,10 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
                     params.visc, params.dt, params.lid_velocity, re, num_particles,
                 )
             }
+            state::FluidModel::Kolmogorov => format!(
+                "kolmogorov | visc={:.4} dt={:.3} amp={:.3} k={:.0} conf={:.1} | p={} | space=params v=field c=colormap t=particles a=arrows r=restart m=model",
+                params.visc, params.dt, params.force_amplitude, params.force_wavenumber, params.confinement, num_particles,
+            ),
         }
     }
 }
@@ -422,11 +427,13 @@ fn run_gui() {
         ColorMap::TokyoNight,
         ColorMap::SolarWind,
         ColorMap::ArcticIce,
+        ColorMap::NeonVortex,
     ];
     let mut colormap_idx = match model {
         state::FluidModel::KelvinHelmholtz => 1,
         state::FluidModel::KarmanVortex => 3,
         state::FluidModel::LidDrivenCavity => 4,
+        state::FluidModel::Kolmogorov => 5,
         _ => 2,
     };
     let mut colormap = colormaps[colormap_idx];
@@ -564,6 +571,7 @@ fn run_gui() {
                 state::FluidModel::KelvinHelmholtz => 1,
                 state::FluidModel::KarmanVortex => 3,
                 state::FluidModel::LidDrivenCavity => 4,
+                state::FluidModel::Kolmogorov => 5,
                 _ => 2,
             };
             colormap = colormaps[colormap_idx];
@@ -815,11 +823,13 @@ fn run_headless() {
         ColorMap::TokyoNight,
         ColorMap::SolarWind,
         ColorMap::ArcticIce,
+        ColorMap::NeonVortex,
     ];
     let mut colormap_idx = match model {
         state::FluidModel::KelvinHelmholtz => 1,
         state::FluidModel::KarmanVortex => 3,
         state::FluidModel::LidDrivenCavity => 4,
+        state::FluidModel::Kolmogorov => 5,
         _ => 2,
     };
     let mut colormap = colormaps[colormap_idx];
@@ -991,6 +1001,7 @@ fn run_headless() {
                             state::FluidModel::KelvinHelmholtz => 1,
                             state::FluidModel::KarmanVortex => 3,
                             state::FluidModel::LidDrivenCavity => 4,
+                            state::FluidModel::Kolmogorov => 5,
                             _ => 2,
                         };
                         colormap = colormaps[colormap_idx];
@@ -1281,6 +1292,7 @@ fn run_gui_playback(dir: &str) {
         ColorMap::TokyoNight,
         ColorMap::SolarWind,
         ColorMap::ArcticIce,
+        ColorMap::NeonVortex,
     ];
     let mut colormap_idx = 0;
 

@@ -4,6 +4,7 @@ pub enum FluidModel {
     KarmanVortex,
     KelvinHelmholtz,
     LidDrivenCavity,
+    Kolmogorov,
 }
 
 impl Default for FluidModel {
@@ -455,6 +456,67 @@ impl SimState {
         for _ in 0..num_particles {
             let px = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (nx as f64 - 5.0);
             let py = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
+            particles_x.push(px);
+            particles_y.push(py);
+        }
+
+        Self {
+            nx,
+            vx,
+            vy,
+            vx0: vec![0.0; size],
+            vy0: vec![0.0; size],
+            temperature,
+            scratch_a: vec![0.0; size],
+            scratch_b: vec![0.0; size],
+            vorticity: vec![0.0; size],
+            vorticity_abs: vec![0.0; size],
+            rng,
+            particles_x,
+            particles_y,
+            mask: None,
+            cylinder: None,
+            trail_xs: vec![Vec::new(); TRAIL_LEN],
+            trail_ys: vec![Vec::new(); TRAIL_LEN],
+            trail_cursor: 0,
+            trail_count: 0,
+        }
+    }
+
+    /// Create initial state for Kolmogorov flow.
+    /// Velocity: sinusoidal profile vx = amplitude * sin(2π * wavenumber * y / N) + noise.
+    /// Dye: horizontal bands for visualization.
+    pub fn new_kolmogorov(num_particles: usize, params: &crate::solver::SolverParams, nx: usize) -> Self {
+        let size = nx * N;
+        let mut rng = Xor128::new(42);
+
+        let amplitude = params.force_amplitude;
+        let wavenumber = params.force_wavenumber;
+        let two_pi_k_over_n = 2.0 * std::f64::consts::PI * wavenumber / N as f64;
+
+        let mut vx = vec![0.0; size];
+        let mut vy = vec![0.0; size];
+        let mut temperature = vec![0.0; size];
+
+        // Initial velocity: sinusoidal profile + small noise
+        for j in 0..N {
+            let base_vx = amplitude * (two_pi_k_over_n * j as f64).sin();
+            // Dye: horizontal bands based on wavenumber
+            let dye = 0.5 + 0.5 * (two_pi_k_over_n * j as f64).sin();
+            for i in 0..nx {
+                let ii = idx(i as i32, j as i32, nx);
+                vx[ii] = base_vx + 1e-4 * rng.next_f64();
+                vy[ii] = 1e-4 * rng.next_f64();
+                temperature[ii] = dye;
+            }
+        }
+
+        // Particles: random positions across the entire domain (periodic, no walls)
+        let mut particles_x = Vec::with_capacity(num_particles);
+        let mut particles_y = Vec::with_capacity(num_particles);
+        for _ in 0..num_particles {
+            let px = (rng.next_f64() + 1.0) * 0.5 * nx as f64;
+            let py = (rng.next_f64() + 1.0) * 0.5 * N as f64;
             particles_x.push(px);
             particles_y.push(py);
         }
@@ -971,5 +1033,54 @@ mod tests {
         let state = SimState::new_cavity(10, N);
         assert!(state.mask.is_none(), "Cavity should have no mask");
         assert!(state.cylinder.is_none(), "Cavity should have no cylinder");
+    }
+
+    #[test]
+    fn test_new_kolmogorov_fields_size() {
+        let params = crate::solver::SolverParams::default_kolmogorov();
+        let state = SimState::new_kolmogorov(50, &params, N);
+        let size = N * N;
+        assert_eq!(state.vx.len(), size);
+        assert_eq!(state.vy.len(), size);
+        assert_eq!(state.temperature.len(), size);
+        assert_eq!(state.particles_x.len(), 50);
+        assert_eq!(state.particles_y.len(), 50);
+    }
+
+    #[test]
+    fn test_new_kolmogorov_sinusoidal_velocity() {
+        let params = crate::solver::SolverParams::default_kolmogorov();
+        let state = SimState::new_kolmogorov(10, &params, N);
+        // vx should vary sinusoidally with y
+        let mid_x = (N / 2) as i32;
+        let vx_quarter = state.vx[idx(mid_x, (N / 4) as i32, N)];
+        let vx_three_quarter = state.vx[idx(mid_x, (3 * N / 4) as i32, N)];
+        // With wavenumber=4, these should have opposite signs at certain y positions
+        // Just verify that vx is not all zero
+        let has_nonzero = state.vx.iter().any(|&v| v.abs() > 1e-6);
+        assert!(has_nonzero, "Kolmogorov vx should have non-zero sinusoidal profile");
+        // Also vx should vary with y (not uniform)
+        assert!((vx_quarter - vx_three_quarter).abs() > 1e-6,
+            "vx should vary with y");
+    }
+
+    #[test]
+    fn test_new_kolmogorov_dye_bands() {
+        let params = crate::solver::SolverParams::default_kolmogorov();
+        let state = SimState::new_kolmogorov(10, &params, N);
+        // Temperature (dye) should have horizontal band pattern
+        let has_variation = (0..N).map(|j| state.temperature[idx(0, j as i32, N)])
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| (w[0] - w[1]).abs() > 0.01);
+        assert!(has_variation, "Dye should have y-dependent band pattern");
+    }
+
+    #[test]
+    fn test_new_kolmogorov_no_mask() {
+        let params = crate::solver::SolverParams::default_kolmogorov();
+        let state = SimState::new_kolmogorov(10, &params, N);
+        assert!(state.mask.is_none(), "Kolmogorov should have no mask");
+        assert!(state.cylinder.is_none(), "Kolmogorov should have no cylinder");
     }
 }

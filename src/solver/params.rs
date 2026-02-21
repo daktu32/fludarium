@@ -23,6 +23,8 @@ pub struct SolverParams {
     pub shear_relax: f64,
     pub shear_thickness: f64,
     pub lid_velocity: f64,
+    pub force_amplitude: f64,
+    pub force_wavenumber: f64,
     pub benchmark_mode: bool,
 }
 
@@ -48,6 +50,8 @@ impl Default for SolverParams {
             shear_relax: 0.0,
             shear_thickness: N as f64 * 3.0 / 80.0,
             lid_velocity: 0.0,
+            force_amplitude: 0.0,
+            force_wavenumber: 0.0,
             benchmark_mode: false,
         }
     }
@@ -76,6 +80,8 @@ impl SolverParams {
             shear_relax: 0.0,
             shear_thickness: N as f64 * 3.0 / 80.0,
             lid_velocity: 0.0,
+            force_amplitude: 0.0,
+            force_wavenumber: 0.0,
             benchmark_mode: false,
         }
     }
@@ -102,6 +108,8 @@ impl SolverParams {
             shear_relax: 1.0,
             shear_thickness: N as f64 * 3.0 / 80.0,
             lid_velocity: 0.0,
+            force_amplitude: 0.0,
+            force_wavenumber: 0.0,
             benchmark_mode: false,
         }
     }
@@ -128,6 +136,37 @@ impl SolverParams {
             shear_velocity: 0.0,
             shear_relax: 0.0,
             shear_thickness: N as f64 * 3.0 / 80.0,
+            force_amplitude: 0.0,
+            force_wavenumber: 0.0,
+            benchmark_mode: false,
+        }
+    }
+
+    /// Default parameters for Kolmogorov flow.
+    /// Sinusoidal body force F_x = amplitude * sin(2π * wavenumber * y / N).
+    pub fn default_kolmogorov() -> Self {
+        Self {
+            visc: 0.005,
+            diff: 0.0005,
+            dt: 0.05,
+            diffuse_iter: 20,
+            project_iter: 30,
+            heat_buoyancy: 0.0,
+            noise_amp: 0.0,
+            source_strength: 0.0,
+            cool_rate: 0.0,
+            bottom_base: 0.0,
+            inflow_vel: 0.0,
+            cylinder_x: 0.0,
+            cylinder_y: 0.0,
+            cylinder_radius: 0.0,
+            confinement: 0.0,
+            shear_velocity: 0.0,
+            shear_relax: 0.0,
+            shear_thickness: N as f64 * 3.0 / 80.0,
+            lid_velocity: 0.0,
+            force_amplitude: 0.08,
+            force_wavenumber: 4.0,
             benchmark_mode: false,
         }
     }
@@ -159,6 +198,8 @@ impl SolverParams {
             shear_relax: 0.0,
             shear_thickness: N as f64 * 3.0 / 80.0,
             lid_velocity: 0.0,
+            force_amplitude: 0.0,
+            force_wavenumber: 0.0,
             benchmark_mode: true,
         }
     }
@@ -212,6 +253,20 @@ mod tests {
         assert!(!SolverParams::default_karman().benchmark_mode);
         assert!(!SolverParams::default_kh().benchmark_mode);
         assert!(!SolverParams::default_cavity().benchmark_mode);
+        assert!(!SolverParams::default_kolmogorov().benchmark_mode);
+    }
+
+    #[test]
+    fn test_default_kolmogorov_params() {
+        let params = SolverParams::default_kolmogorov();
+        assert_eq!(params.visc, 0.005);
+        assert_eq!(params.diff, 0.0005);
+        assert_eq!(params.dt, 0.05);
+        assert_eq!(params.force_amplitude, 0.08);
+        assert_eq!(params.force_wavenumber, 4.0);
+        assert_eq!(params.confinement, 0.0);
+        assert_eq!(params.diffuse_iter, 20);
+        assert_eq!(params.project_iter, 30);
     }
 
     #[test]

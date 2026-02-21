@@ -18,16 +18,23 @@ pub enum BoundaryConfig {
     KarmanVortex { inflow_vel: f64 },
     KelvinHelmholtz,
     LidDrivenCavity { lid_velocity: f64 },
+    Kolmogorov,
 }
 
 impl BoundaryConfig {
     /// Whether the X-axis uses periodic (wrapping) boundaries.
     pub fn periodic_x(&self) -> bool {
-        matches!(self, BoundaryConfig::RayleighBenard { .. } | BoundaryConfig::RayleighBenardBenchmark | BoundaryConfig::KelvinHelmholtz)
+        matches!(self, BoundaryConfig::RayleighBenard { .. } | BoundaryConfig::RayleighBenardBenchmark | BoundaryConfig::KelvinHelmholtz | BoundaryConfig::Kolmogorov)
+    }
+
+    /// Whether the Y-axis uses periodic (wrapping) boundaries.
+    /// Only Kolmogorov flow is doubly periodic.
+    pub fn periodic_y(&self) -> bool {
+        matches!(self, BoundaryConfig::Kolmogorov)
     }
 
     /// X iteration range for interior loops.
-    /// RayleighBenard/KelvinHelmholtz: full width `(0, nx)` (periodic wrap handled by `idx`).
+    /// RayleighBenard/KelvinHelmholtz/Kolmogorov: full width `(0, nx)` (periodic wrap handled by `idx`).
     /// KarmanVortex/LidDrivenCavity: skip boundary columns `(1, nx-1)`.
     pub fn x_range(&self, nx: usize) -> (usize, usize) {
         match self {
@@ -55,6 +62,9 @@ pub fn set_bnd(field_type: FieldType, x: &mut [f64], bc: &BoundaryConfig, nx: us
         }
         BoundaryConfig::LidDrivenCavity { lid_velocity } => {
             set_bnd_cavity(field_type, x, *lid_velocity, nx);
+        }
+        BoundaryConfig::Kolmogorov => {
+            set_bnd_kolmogorov(x, nx);
         }
     }
 }
@@ -177,6 +187,17 @@ fn set_bnd_kh(field_type: FieldType, x: &mut [f64], nx: usize) {
                 x[idx(i as i32, (N - 1) as i32, nx)] = x[idx(i as i32, (N - 2) as i32, nx)];
             }
         }
+    }
+}
+
+/// Kolmogorov flow boundary conditions.
+/// Doubly periodic: X periodic (handled by idx wrap), Y periodic via ghost cells.
+/// Ghost row 0 copies from row N-2; ghost row N-1 copies from row 1.
+fn set_bnd_kolmogorov(x: &mut [f64], nx: usize) {
+    for i in 0..nx {
+        // Y periodic ghost cells
+        x[idx(i as i32, 0, nx)] = x[idx(i as i32, (N - 2) as i32, nx)];
+        x[idx(i as i32, (N - 1) as i32, nx)] = x[idx(i as i32, 1, nx)];
     }
 }
 
@@ -514,5 +535,44 @@ mod tests {
     fn test_cavity_x_range() {
         let bc = cavity_bc();
         assert_eq!(bc.x_range(N), (1, N - 1), "Cavity should skip boundary columns");
+    }
+
+    #[test]
+    fn test_kolmogorov_periodic_xy() {
+        let bc = BoundaryConfig::Kolmogorov;
+        assert!(bc.periodic_x(), "Kolmogorov should have periodic X");
+        assert!(bc.periodic_y(), "Kolmogorov should have periodic Y");
+        assert_eq!(bc.x_range(N), (0, N), "Kolmogorov should use full width");
+    }
+
+    #[test]
+    fn test_kolmogorov_bnd_y_periodic_ghost() {
+        let bc = BoundaryConfig::Kolmogorov;
+        let mut field = vec![0.0; N * N];
+        // Set known values at interior rows 1 and N-2
+        for i in 0..N {
+            field[idx(i as i32, 1, N)] = 42.0;
+            field[idx(i as i32, (N - 2) as i32, N)] = 99.0;
+        }
+        set_bnd(FieldType::Scalar, &mut field, &bc, N);
+        // Ghost row 0 should copy from row N-2
+        for i in 0..N {
+            assert_eq!(field[idx(i as i32, 0, N)], 99.0,
+                "Ghost row 0 should copy row N-2 at x={}", i);
+        }
+        // Ghost row N-1 should copy from row 1
+        for i in 0..N {
+            assert_eq!(field[idx(i as i32, (N - 1) as i32, N)], 42.0,
+                "Ghost row N-1 should copy row 1 at x={}", i);
+        }
+    }
+
+    #[test]
+    fn test_other_models_not_periodic_y() {
+        assert!(!rb_bc().periodic_y());
+        assert!(!BoundaryConfig::KarmanVortex { inflow_vel: 0.1 }.periodic_y());
+        assert!(!BoundaryConfig::KelvinHelmholtz.periodic_y());
+        assert!(!cavity_bc().periodic_y());
+        assert!(!bench_bc().periodic_y());
     }
 }

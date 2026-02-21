@@ -11,6 +11,8 @@ pub enum ColorMap {
     ArcticIce,
     /// Blue-White-Red: diverging colormap for signed data (vorticity etc).
     BlueWhiteRed,
+    /// Neon Vortex: dark void -> teal -> emerald -> lime -> gold (for Kolmogorov).
+    NeonVortex,
 }
 
 /// Tokyo Night-inspired color stops for field mapping.
@@ -54,6 +56,16 @@ pub(crate) const ARCTIC_ICE_STOPS: [(f64, f64, f64); 5] = [
     (120.0, 255.0, 200.0),// bright mint             (1.00)
 ];
 
+/// Neon Vortex color stops: dark void -> teal -> emerald -> lime -> gold.
+/// Designed for Kolmogorov flow: dye mixing patterns glow like neon against dark void.
+pub(crate) const NEON_VORTEX_STOPS: [(f64, f64, f64); 5] = [
+    (5.0, 8.0, 15.0),     // dark void              (0.00)
+    (10.0, 80.0, 90.0),   // deep teal              (0.25)
+    (20.0, 160.0, 100.0), // emerald green           (0.50)
+    (140.0, 220.0, 50.0), // lime                    (0.75)
+    (255.0, 200.0, 60.0), // neon gold               (1.00)
+];
+
 /// Blue-White-Red diverging colormap: deep blue -> blue -> white -> red -> deep red.
 /// Designed for signed data like vorticity: blue=negative, white=zero, red=positive.
 pub(crate) const BLUE_WHITE_RED_STOPS: [(f64, f64, f64); 5] = [
@@ -78,6 +90,7 @@ pub fn map_to_rgba(t: f64, colormap: ColorMap) -> [u8; 4] {
         ColorMap::SolarWind => &SOLAR_WIND_STOPS,
         ColorMap::ArcticIce => &ARCTIC_ICE_STOPS,
         ColorMap::BlueWhiteRed => &BLUE_WHITE_RED_STOPS,
+        ColorMap::NeonVortex => &NEON_VORTEX_STOPS,
     };
 
     let t = t.clamp(0.0, 1.0);

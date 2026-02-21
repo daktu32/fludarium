@@ -56,6 +56,7 @@ impl VizMode {
             (VizMode::Field, FluidModel::KarmanVortex) => "dye conc.",
             (VizMode::Field, FluidModel::KelvinHelmholtz) => "shear layer",
             (VizMode::Field, FluidModel::LidDrivenCavity) => "velocity mag.",
+            (VizMode::Field, FluidModel::Kolmogorov) => "dye tracer",
             (VizMode::Vorticity, _) => "vorticity",
             (VizMode::Streamline, _) => "streamline",
             (VizMode::None, _) => "particles",

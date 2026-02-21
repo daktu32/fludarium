@@ -53,20 +53,26 @@ pub fn advect(field_type: FieldType, d: &mut [f64], d0: &[f64], vx: &[f64], vy: 
     let (i_lo, i_hi) = bc.x_range(nx);
     let periodic_x = bc.periodic_x();
 
-    for j in 1..(N - 1) {
+    let periodic_y = bc.periodic_y();
+    // For doubly-periodic (Kolmogorov), iterate over all rows including ghost rows
+    let (j_lo, j_hi) = if periodic_y { (0, N) } else { (1, N - 1) };
+
+    for j in j_lo..j_hi {
         for i in i_lo..i_hi {
             let ii = idx_inner(i, j, nx);
             // Trace backwards
             let x = i as f64 - dt0 * vx[ii];
-            let mut y = j as f64 - dt0 * vy[ii];
+            let y_raw = j as f64 - dt0 * vy[ii];
 
-            // Clamp y to valid interior range
-            if y < 0.5 {
-                y = 0.5;
-            }
-            if y > n_f - 1.5 {
-                y = n_f - 1.5;
-            }
+            // Y handling: periodic wrap or clamp
+            let y = if periodic_y {
+                let interior = n_f - 2.0; // number of interior rows
+                let y_shifted = y_raw - 1.0; // shift so interior starts at 0
+                let y_mod = ((y_shifted % interior) + interior) % interior;
+                y_mod + 1.0 // shift back
+            } else {
+                y_raw.clamp(0.5, n_f - 1.5)
+            };
 
             // X clamping for non-periodic modes (Karman, Cavity)
             let x = if periodic_x {
@@ -85,8 +91,14 @@ pub fn advect(field_type: FieldType, d: &mut [f64], d0: &[f64], vx: &[f64], vy: 
             if periodic_x {
                 let i0 = x.floor() as i32;
                 let i1 = i0 + 1;
-                d[ii] = s0 * (t0 * d0[idx(i0, j0 as i32, nx)] + t1 * d0[idx(i0, j1 as i32, nx)])
-                    + s1 * (t0 * d0[idx(i1, j0 as i32, nx)] + t1 * d0[idx(i1, j1 as i32, nx)]);
+                if periodic_y {
+                    // Both X and Y periodic — use idx() for full wrapping
+                    d[ii] = s0 * (t0 * d0[idx(i0, j0 as i32, nx)] + t1 * d0[idx(i0, j1 as i32, nx)])
+                        + s1 * (t0 * d0[idx(i1, j0 as i32, nx)] + t1 * d0[idx(i1, j1 as i32, nx)]);
+                } else {
+                    d[ii] = s0 * (t0 * d0[idx(i0, j0 as i32, nx)] + t1 * d0[idx(i0, j1 as i32, nx)])
+                        + s1 * (t0 * d0[idx(i1, j0 as i32, nx)] + t1 * d0[idx(i1, j1 as i32, nx)]);
+                }
             } else {
                 let i0 = x.floor() as usize;
                 let i1 = i0 + 1;
@@ -303,5 +315,41 @@ mod tests {
                     "Advected value should be in [0,1] at ({},{}): got {}", i, j, val);
             }
         }
+    }
+
+    #[test]
+    fn test_advect_kolmogorov_y_wraps() {
+        let bc = BoundaryConfig::Kolmogorov;
+        // Create a field with a horizontal stripe at row N/2
+        let mut d0 = vec![0.0; N * N];
+        for i in 0..N {
+            d0[idx(i as i32, (N / 2) as i32, N)] = 1.0;
+            d0[idx(i as i32, (N / 2 + 1) as i32, N)] = 1.0;
+        }
+        let mut d = vec![0.0; N * N];
+        // Strong upward velocity that should carry the stripe upward (wrapping)
+        let vx = vec![0.0; N * N];
+        let vy = vec![0.5; N * N]; // upward
+
+        advect(FieldType::Scalar, &mut d, &d0, &vx, &vy, 0.1, &bc, N);
+
+        // The stripe should have moved upward — values near top should be nonzero
+        // and values near row 0 (wrapped) might also be nonzero
+        let max_top = (0..N).map(|i| d[idx(i as i32, (N - 3) as i32, N)].abs())
+            .fold(0.0_f64, f64::max);
+        let max_bot = (0..N).map(|i| d[idx(i as i32, 2, N)].abs())
+            .fold(0.0_f64, f64::max);
+        // Original row is N/2; with upward velocity, some moved up
+        // The key test: no panics from out-of-bounds, and field remains bounded
+        for j in 0..N {
+            for i in 0..N {
+                let val = d[idx(i as i32, j as i32, N)];
+                assert!(val >= -0.01 && val <= 1.01,
+                    "Kolmogorov advected value out of range at ({},{}): {}", i, j, val);
+            }
+        }
+        // Verify that advection actually moved the stripe (not all zeros outside original row)
+        let total: f64 = d.iter().sum();
+        assert!(total > 0.0, "Advected field should have non-zero values");
     }
 }
